@@ -337,6 +337,15 @@ class Plugin:
         await cls.evt_handler.ws.send_json({"type": "$set_user_volume", "id": user_id, "volume": volume})
 
     @classmethod
+    async def set_discord_status(cls, status):
+        # status: "online" | "idle" | "dnd" | "invisible"
+        await cls.evt_handler.ws.send_json({"type": "$set_status", "status": status})
+
+    @classmethod
+    async def get_discord_status(cls):
+        return await cls.evt_handler.api._store_access_request("$get_status")
+
+    @classmethod
     async def get_last_channels(cls):
         return await cls.evt_handler.api.get_last_channels()
 

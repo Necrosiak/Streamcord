@@ -271,6 +271,23 @@ window.Vencord.Plugins.plugins.Streamcord = {
                                 case "$set_user_volume":
                                     FluxDispatcher.dispatch({ type: "AUDIO_SET_LOCAL_VOLUME", userId: data.id, volume: data.volume });
                                     return;
+                                case "$set_status": {
+                                    // data.status: "online" | "idle" | "dnd" | "invisible"
+                                    try {
+                                        const mod = Vencord.Webpack.find(m => m && typeof m.updateStatus === "function");
+                                        if (mod) { mod.updateStatus(data.status); console.log("[Streamcord] status → " + data.status); }
+                                        else console.warn("[Streamcord] no updateStatus module");
+                                    } catch (e) { console.error("[Streamcord] set_status err", e); }
+                                    return;
+                                }
+                                case "$get_status": {
+                                    try {
+                                        const me = Vencord.Webpack.Common.UserStore.getCurrentUser();
+                                        const PS = Vencord.Webpack.findStore("PresenceStore");
+                                        result = { status: PS?.getStatus?.(me.id) || "online" };
+                                    } catch (e) { result = { status: "online" }; }
+                                    break;
+                                }
                                 case "$golive": {
                                     const selChStore = Vencord.Webpack.findStore("SelectedChannelStore");
                                     const golive_channel_id = selChStore?.getVoiceChannelId?.();

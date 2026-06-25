@@ -12,7 +12,7 @@ import {
   Dropdown,
   findModuleExport,
 } from "@decky/ui";
-import { Component, Suspense, useState } from "react";
+import { Component, Suspense, useState, useEffect } from "react";
 import { FaDiscord } from "react-icons/fa";
 
 class ContentErrorBoundary extends Component<{ children: any }, { hasError: boolean; msg: string }> {
@@ -117,6 +117,72 @@ const NotLoggedIn = ({ qr_login, captcha_needed }: { qr_login?: string; captcha_
 
 const BtnTab = DialogButton as any;
 
+const STATUSES: { id: string; emoji: string; color: string }[] = [
+  { id: "online", emoji: "🟢", color: "#23a55a" },
+  { id: "idle", emoji: "🌙", color: "#f0b232" },
+  { id: "dnd", emoji: "⛔", color: "#f23f43" },
+  { id: "invisible", emoji: "⚪", color: "#80848e" },
+];
+
+// Map Steam persona state → Discord status (Steam: 0 offline,1 online,2 busy,3 away,4 snooze,7 invisible)
+const steamToDiscord = (s: number): string =>
+  ({ 1: "online", 2: "dnd", 3: "idle", 4: "idle", 7: "invisible", 0: "invisible" } as any)[s] || "online";
+
+const StatusSelector = () => {
+  const [current, setCurrent] = useState<string>("online");
+
+  const setStatus = async (id: string) => {
+    setCurrent(id);
+    await call("set_discord_status", id);
+  };
+
+  useEffect(() => {
+    // Initial Discord status
+    call<[], any>("get_discord_status").then((r) => { if (r?.status) setCurrent(r.status); }).catch(() => {});
+
+    // Auto-sync: follow the local Steam persona state → Discord status.
+    let lastSteam: number | null = null;
+    const readSteam = (): number | null => {
+      try {
+        const fs: any = (window as any).friendStore || (window as any).App?.m_FriendStore;
+        const st = fs?.m_self?.persona_state ?? fs?.GetMyPersonaState?.() ?? (window as any).App?.m_CurrentUser?.persona_state;
+        return typeof st === "number" ? st : null;
+      } catch { return null; }
+    };
+    const sync = () => {
+      const s = readSteam();
+      if (s !== null && s !== lastSteam) {
+        lastSteam = s;
+        const disc = steamToDiscord(s);
+        console.log("[Streamcord] Steam persona " + s + " → Discord " + disc);
+        setStatus(disc);
+      }
+    };
+    sync();
+    const timer = setInterval(sync, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+      {STATUSES.map((s) => (
+        <BtnTab
+          key={s.id}
+          onClick={() => setStatus(s.id)}
+          style={{
+            flex: "1 1 0", minWidth: 0, margin: 0, padding: "4px 0", fontSize: 14, minHeight: 0,
+            boxSizing: "border-box",
+            background: current === s.id ? s.color : "rgba(255,255,255,0.06)",
+            opacity: current === s.id ? 1 : 0.6,
+          }}
+        >
+          {s.emoji}
+        </BtnTab>
+      ))}
+    </div>
+  );
+};
+
 const Content = () => {
   const state = useStreamcordState();
   const [voiceTab, setVoiceTab] = useState<"servers" | "dms">("servers");
@@ -170,6 +236,11 @@ const Content = () => {
               />
               {state?.me?.username}
             </span>
+          </SR>
+        </div>
+        <div style={{ marginBottom: "12px" }}>
+          <SR>
+            <StatusSelector />
           </SR>
         </div>
         <div style={{ marginBottom: "12px" }}>
