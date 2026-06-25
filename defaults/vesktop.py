@@ -59,6 +59,9 @@ async def launch():
         "--disable-background-timer-throttling",
         "--disable-renderer-backgrounding",
         "--disable-backgrounding-occluded-windows",
+        # Login token persists, so we no longer need the window visible for the QR —
+        # start it minimized so it runs invisibly in the background.
+        "--start-minimized",
         stdout=DEVNULL, stderr=DEVNULL, env=env,
     )
     for _ in range(60):
