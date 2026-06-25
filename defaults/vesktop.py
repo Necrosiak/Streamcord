@@ -59,7 +59,6 @@ async def launch():
         "--disable-background-timer-throttling",
         "--disable-renderer-backgrounding",
         "--disable-backgrounding-occluded-windows",
-        "--start-minimized",
         stdout=DEVNULL, stderr=DEVNULL, env=env,
     )
     for _ in range(60):

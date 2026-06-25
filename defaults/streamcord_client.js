@@ -615,20 +615,36 @@ window.Vencord.Plugins.plugins.Streamcord = {
                 if (window.STREAMCORD_WS?.readyState === 1)
                     window.STREAMCORD_WS.send(JSON.stringify({ type: "REMOTE_AUTH_QR_SVG", svg_b64: url }));
             };
+            // A real QR is black & white; Discord's "loading" placeholder in the same
+            // 240×240 canvas is a colorful shapes animation. Only mirror an actual QR so
+            // the QAM never shows the weird loading image.
+            const looksLikeQR = (canvas) => {
+                try {
+                    const ctx = canvas.getContext("2d");
+                    const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                    let colorful = 0, total = 0;
+                    for (let i = 0; i < d.length; i += 4 * 64) {
+                        const r = d[i], g = d[i + 1], b = d[i + 2];
+                        if (Math.max(r, g, b) - Math.min(r, g, b) > 40) colorful++;
+                        total++;
+                    }
+                    return total > 0 && (colorful / total) < 0.12; // QR ≈ pure B/W
+                } catch (e) { return true; }
+            };
             let lastUrl = null;
             setInterval(() => {
                 if (Vencord.Webpack.Common.UserStore?.getCurrentUser?.()) {
                     if (lastUrl !== null) { lastUrl = null; sendQR(null); }
                     return;
                 }
-                // Discord renders QR on a 240×240 canvas when visible (no spinner)
                 const spinner = document.querySelector('[class*="spinner"]');
                 const canvas = Array.from(document.querySelectorAll('canvas')).find(c => c.width === 240 && c.height === 240);
-                if (canvas && !spinner) {
+                if (canvas && !spinner && looksLikeQR(canvas)) {
                     const url = canvas.toDataURL('image/png');
                     if (url.length > 5000 && url !== lastUrl) { lastUrl = url; sendQR(url); }
                     return;
                 }
+                // No real QR yet (loading placeholder) → clear so the QAM shows "loading"
                 if (lastUrl !== null) { lastUrl = null; sendQR(null); }
             }, 1500);
         })();
