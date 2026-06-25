@@ -51,6 +51,7 @@ import { UploadScreenshot } from "./components/UploadScreenshot";
 import { GoLiveButton } from "./components/buttons/GoLiveButton";
 import { ChannelBrowser } from "./components/ChannelBrowser";
 import { DMBrowser } from "./components/DMBrowser";
+import { TextChat } from "./components/TextChat";
 import { t } from "./i18n";
 import {
   call,
@@ -381,6 +382,12 @@ const Content = () => {
                 {voiceTab === "servers" ? <ChannelBrowser /> : <DMBrowser />}
               </>
             )}
+          </SR>
+        </div>
+        <hr />
+        <div style={{ marginBottom: "12px" }}>
+          <SR>
+            <TextChat />
           </SR>
         </div>
         <SR>

@@ -457,6 +457,58 @@ window.Vencord.Plugins.plugins.Streamcord = {
                                     }));
                                     break;
                                 }
+                                case "$get_text_channels": {
+                                    // Serveurs → salons texte (type 0) + annonces (type 5) accessibles.
+                                    const GS = Vencord.Webpack.Common.GuildStore;
+                                    const GCS = Vencord.Webpack.findStore("GuildChannelStore");
+                                    const SGS = Vencord.Webpack.findStore("SortedGuildStore");
+                                    const sortedIds = SGS?.getFlattenedGuildIds?.() ?? Object.keys(GS.getGuilds());
+                                    const allGuilds = GS.getGuilds();
+                                    result = [];
+                                    for (const gid of sortedIds) {
+                                        const guild = allGuilds[gid];
+                                        if (!guild) continue;
+                                        try {
+                                            const gc = GCS.getChannels(guild.id);
+                                            const list = gc?.SELECTABLE || [];
+                                            const channels = list
+                                                .map(e => {
+                                                    const ch = e.channel ?? e;
+                                                    if (!ch || (ch.type !== 0 && ch.type !== 5)) return null;
+                                                    return { id: String(ch.id), name: String(ch.name), type: ch.type };
+                                                })
+                                                .filter(Boolean);
+                                            if (channels.length)
+                                                result.push({ id: String(guild.id), name: String(guild.name), icon: guild.icon || null, channels });
+                                        } catch (_) { }
+                                    }
+                                    break;
+                                }
+                                case "$get_messages": {
+                                    // MessageStore est vide pour un salon non ouvert → RestAPI (newest-first,
+                                    // on inverse pour l'ordre de lecture). Timestamps ISO.
+                                    const res = await Vencord.Webpack.Common.RestAPI.get({ url: `/channels/${data.id}/messages?limit=30` });
+                                    const arr = (res?.body || []).slice().reverse();
+                                    result = arr.map(m => ({
+                                        id: String(m.id),
+                                        author: m.author?.global_name || m.author?.username || "?",
+                                        author_id: String(m.author?.id || ""),
+                                        avatar: m.author?.avatar || null,
+                                        bot: !!m.author?.bot,
+                                        content: m.content ?? "",
+                                        ts: m.timestamp || null,
+                                        attachments: Array.isArray(m.attachments) ? m.attachments.length : 0,
+                                    }));
+                                    break;
+                                }
+                                case "$send_message": {
+                                    await Vencord.Webpack.Common.RestAPI.post({
+                                        url: `/channels/${data.id}/messages`,
+                                        body: { content: String(data.content || "") },
+                                    });
+                                    result = true;
+                                    break;
+                                }
                                 case "$webrtc":
                                     return;
                                 case "$login_token": {

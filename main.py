@@ -384,6 +384,18 @@ class Plugin:
         return await cls.evt_handler.api.dm_call(channel_id, join_existing)
 
     @classmethod
+    async def get_text_channels(cls):
+        return await cls.evt_handler.api.get_text_channels()
+
+    @classmethod
+    async def get_messages(cls, channel_id):
+        return await cls.evt_handler.api.get_messages(channel_id)
+
+    @classmethod
+    async def send_message(cls, channel_id, content):
+        return await cls.evt_handler.api.send_message(channel_id, content)
+
+    @classmethod
     async def go_live(cls):
         await cls.evt_handler.ws.send_json({"type": "$golive", "stop": False})
 

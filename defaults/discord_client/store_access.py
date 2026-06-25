@@ -103,3 +103,12 @@ class StoreAccess:
 
     async def dm_call(self, channel_id, join_existing=False):
         return await self._store_access_request("$dm_call", id=channel_id, join_existing=join_existing)
+
+    async def get_text_channels(self):
+        return await self._store_access_request("$get_text_channels")
+
+    async def get_messages(self, channel_id):
+        return await self._store_access_request("$get_messages", id=channel_id)
+
+    async def send_message(self, channel_id, content):
+        return await self._store_access_request("$send_message", id=channel_id, content=content)
