@@ -51,10 +51,7 @@ Przejście na natywność rozwiązuje trudne problemy starego podejścia z ukryt
 Vesktop jest instalowany i uruchamiany automatycznie przez wtyczkę przy pierwszym uruchomieniu. Wystarczy zalogować się raz (QR lub pełny ekran) i pozostajesz zalogowany.
 
 ### Wymaganie (udostępnianie ekranu)
-Serwer udostępniania używa systemowego Pythona + GStreamer. Zainstaluj zależności Pythona raz:
-```bash
-python -m pip install --user aiohttp aiohttp_cors
-```
+Udostępnianie ekranu działa od razu — wtyczka automatycznie instaluje zależność Pythona (aiohttp) przy pierwszym uruchomieniu. GStreamer pochodzi z systemu.
 
 ---
 

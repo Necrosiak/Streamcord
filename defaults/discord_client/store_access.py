@@ -112,3 +112,9 @@ class StoreAccess:
 
     async def send_message(self, channel_id, content):
         return await self._store_access_request("$send_message", id=channel_id, content=content)
+
+    async def get_local_mute(self, user_id):
+        return await self._store_access_request("$get_local_mute", id=user_id)
+
+    async def toggle_local_mute(self, user_id):
+        return await self._store_access_request("$toggle_local_mute", id=user_id)

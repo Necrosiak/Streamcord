@@ -51,10 +51,7 @@ Overstappen op native lost de moeilijke problemen van de oude verborgen-browsera
 Vesktop wordt de eerste keer automatisch door de plugin geïnstalleerd en gestart. Log één keer in (QR of volledig scherm) en je blijft ingelogd.
 
 ### Vereiste (scherm delen)
-De server voor scherm delen gebruikt de systeem-Python + GStreamer. Installeer de Python-afhankelijkheden eenmalig:
-```bash
-python -m pip install --user aiohttp aiohttp_cors
-```
+Schermdelen werkt meteen — de plugin installeert zijn Python-afhankelijkheid (aiohttp) automatisch bij de eerste start. GStreamer komt van het systeem.
 
 ---
 

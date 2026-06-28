@@ -225,26 +225,91 @@ const startStatusSync = () => {
 };
 const stopStatusSync = () => { if (_statusTimer) { clearInterval(_statusTimer); _statusTimer = null; } };
 
-const StatusSelector = () => {
+// Pseudo cliquable : avatar + nom + icône du statut courant à droite. Clic →
+// déplie le sélecteur de statut (en ligne). Une sélection manuelle coupe l'auto-sync.
+const UserStatusButton = ({ me }: { me: any }) => {
   const [current, setCurrent] = useState<string>(currentDiscordStatus);
-  const [auto, setAutoState] = useState<boolean>(getAutoSync());
+  const [open, setOpen] = useState(false);
   const [focused, setFocused] = useState<string | null>(null);
 
   useEffect(() => {
-    // Reflète le statut posé par le poll de fond.
     const fn = (s: string) => setCurrent(s);
     statusListeners.add(fn);
     setCurrent(currentDiscordStatus);
     return () => { statusListeners.delete(fn); };
   }, []);
 
-  const pickStatus = async (id: string) => {
-    // Sélection manuelle = prise de contrôle → coupe l'auto pour ne pas être réécrasé.
-    if (auto) { setAutoSync(false); setAutoState(false); }
+  const pick = async (id: string) => {
+    if (getAutoSync()) setAutoSync(false); // prise de contrôle manuelle
     setCurrent(id);
+    setOpen(false);
     await applyDiscordStatus(id);
   };
 
+  const cur = STATUSES.find((x) => x.id === current) || STATUSES[0];
+
+  return (
+    <div>
+      <BtnTab
+        onClick={() => setOpen((o) => !o)}
+        onFocus={() => setFocused("name")}
+        onBlur={() => setFocused((f) => (f === "name" ? null : f))}
+        style={{
+          display: "flex", alignItems: "center", gap: 8, width: "100%",
+          padding: "4px 8px", margin: 0, minHeight: 0, boxSizing: "border-box",
+          background: focused === "name" ? "rgba(88,101,242,0.6)" : "rgba(255,255,255,0.06)",
+          boxShadow: focused === "name" ? "0 0 0 2px #fff" : "none",
+        }}
+      >
+        <img
+          src={"https://cdn.discordapp.com/avatars/" + me?.id + "/" + me?.avatar + ".webp"}
+          width={32} height={32}
+          style={{ display: "block", borderRadius: "50%", flexShrink: 0 }}
+        />
+        <span style={{ flex: 1, textAlign: "left", fontSize: 13, fontWeight: 600 }}>{me?.username}</span>
+        {/* Statut courant (icône) à droite du pseudo. */}
+        <span style={{ fontSize: 14 }}>{cur.emoji}</span>
+        <span style={{ opacity: 0.4, fontSize: 10 }}>{open ? "▲" : "▼"}</span>
+      </BtnTab>
+      {open && (
+        <Focusable
+          style={{ display: "flex", gap: 6, justifyContent: "center", marginTop: 6 }}
+          flow-children="horizontal"
+        >
+          {STATUSES.map((s) => {
+            const selected = current === s.id;
+            const isF = focused === s.id;
+            return (
+              <BtnTab
+                key={s.id}
+                onClick={() => pick(s.id)}
+                onFocus={() => setFocused(s.id)}
+                onBlur={() => setFocused((f) => (f === s.id ? null : f))}
+                style={{
+                  flex: "1 1 0", minWidth: 0, margin: 0, padding: "4px 0", fontSize: 16, minHeight: 0,
+                  boxSizing: "border-box",
+                  background: selected ? s.color : "rgba(255,255,255,0.06)",
+                  opacity: selected ? 1 : 0.5,
+                  border: selected ? "2px solid #fff" : "2px solid transparent",
+                  boxShadow: isF ? "0 0 0 3px #fff, 0 0 10px 2px " + s.color : "none",
+                  transform: isF ? "scale(1.12)" : "scale(1)",
+                  transition: "transform .08s ease, box-shadow .08s ease, opacity .08s ease",
+                  zIndex: isF ? 1 : 0,
+                }}
+              >
+                {s.emoji}
+              </BtnTab>
+            );
+          })}
+        </Focusable>
+      )}
+    </div>
+  );
+};
+
+// Réglage Config : toggle de suivi auto du statut Steam → Discord.
+const StatusAutoToggle = () => {
+  const [auto, setAutoState] = useState<boolean>(getAutoSync());
   const toggleAuto = (v: boolean) => {
     setAutoSync(v);
     setAutoState(v);
@@ -252,65 +317,18 @@ const StatusSelector = () => {
       // Réactivation → resync immédiat sur l'état Steam courant.
       _statusLastSteam = null;
       const s = readSteamPersona();
-      if (s !== null) {
-        _statusLastSteam = s;
-        const disc = steamToDiscord(s);
-        setCurrent(disc);
-        applyDiscordStatus(disc);
-      }
+      if (s !== null) { _statusLastSteam = s; applyDiscordStatus(steamToDiscord(s)); }
     }
   };
-
   return (
-    <>
-      <SR>
-        <ToggleField
-          label={t("follow_steam_status")}
-          checked={auto}
-          onChange={toggleAuto}
-          bottomSeparator="none"
-        />
-      </SR>
-      <SR>
-        {/* Focusable + flow-children="horizontal" : la rangée devient UN seul arrêt
-            de navigation verticale (D-pad bas sort vers le reste du panneau) tandis
-            que gauche/droite circule entre les boutons. Un <div> flex de boutons
-            bruts piège le focus en horizontal (impossible de descendre). */}
-        <Focusable
-          style={{ display: "flex", gap: 6, justifyContent: "center" }}
-          flow-children="horizontal"
-        >
-          {STATUSES.map((s) => {
-            const selected = current === s.id;
-            const isFocused = focused === s.id;
-            return (
-              <BtnTab
-                key={s.id}
-                onClick={() => pickStatus(s.id)}
-                onFocus={() => setFocused(s.id)}
-                onBlur={() => setFocused((f) => (f === s.id ? null : f))}
-                style={{
-              flex: "1 1 0", minWidth: 0, margin: 0, padding: "4px 0", fontSize: 16, minHeight: 0,
-              boxSizing: "border-box",
-              // Fond couleur plein = statut ACTIF ; sinon estompé.
-              background: selected ? s.color : "rgba(255,255,255,0.06)",
-              opacity: selected ? 1 : 0.5,
-              // Bordure blanche permanente sur l'actif (lisible sans focus).
-              border: selected ? "2px solid #fff" : "2px solid transparent",
-              // Anneau blanc + agrandissement = CURSEUR manette (focus).
-              boxShadow: isFocused ? "0 0 0 3px #fff, 0 0 10px 2px " + s.color : "none",
-              transform: isFocused ? "scale(1.12)" : "scale(1)",
-              transition: "transform .08s ease, box-shadow .08s ease, opacity .08s ease",
-              zIndex: isFocused ? 1 : 0,
-            }}
-          >
-            {s.emoji}
-          </BtnTab>
-        );
-      })}
-        </Focusable>
-      </SR>
-    </>
+    <SR>
+      <ToggleField
+        label={t("follow_steam_status")}
+        checked={auto}
+        onChange={toggleAuto}
+        bottomSeparator="none"
+      />
+    </SR>
   );
 };
 
@@ -389,8 +407,8 @@ const UpdaterSection = () => {
 
 const Content = () => {
   const state = useSteamcordState();
-  const [topTab, setTopTab] = useState<"voice" | "convs">("voice");
-  const [voiceTab, setVoiceTab] = useState<"servers" | "dms">("servers");
+  const [topTab, setTopTab] = useState<"voice" | "text" | "config">("voice");
+  const [srcTab, setSrcTab] = useState<"servers" | "dms">("servers");
   const [tabFocus, setTabFocus] = useState<string | null>(null);
   // En appel : la vue par défaut est l'appel en cours. « Parcourir Discord »
   // bascule browsing=true pour révéler la navigation SANS quitter l'appel.
@@ -411,52 +429,46 @@ const Content = () => {
   } else {
     return (
       <SP>
+        {/* Pseudo TOUJOURS en haut → changement de statut accessible en permanence. */}
         <div style={{ marginBottom: "12px" }}>
           <SR>
-            <SF style={{ display: "flex", justifyContent: "center" }}>
-              <MuteButton />
-              <DeafenButton />
-              <DisconnectButton />
-            </SF>
-          </SR>
-        </div>
-        <div style={{ marginBottom: "12px" }}>
-          <SR>
-            <div style={{ display: "flex", justifyContent: "center" }}>
-              <PushToTalkButton />
-            </div>
+            <UserStatusButton me={state?.me} />
           </SR>
         </div>
         <hr></hr>
+        {/* Contrôles vocaux SOUS le pseudo : mute micro / casque / déconnexion.
+            Focusable + flow-children="horizontal" → D-pad gauche/droite circule
+            entre les boutons (sinon nav unidirectionnelle). */}
         <div style={{ marginBottom: "12px" }}>
           <SR>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
-              <img
-                src={
-                  "https://cdn.discordapp.com/avatars/" +
-                  state?.me?.id +
-                  "/" +
-                  state?.me?.avatar +
-                  ".webp"
-                }
-                width={32}
-                height={32}
-                style={{ display: "block", borderRadius: "50%" }}
-              />
-              {state?.me?.username}
-            </span>
+            <Focusable flow-children="horizontal" style={{ display: "flex", justifyContent: "center", gap: 6 }}>
+              <MuteButton />
+              <DeafenButton />
+              <DisconnectButton />
+            </Focusable>
           </SR>
         </div>
         <div style={{ marginBottom: "12px" }}>
-          <StatusSelector />
+          <SR>
+            <Focusable flow-children="horizontal" style={{ display: "flex", justifyContent: "center" }}>
+              <PushToTalkButton />
+            </Focusable>
+          </SR>
         </div>
-        {/* Navigation Discord : onglets Vocal / Messages TOUJOURS visibles,
-            même en appel. Permet de consulter la messagerie ou de rejoindre un
-            autre serveur sans quitter l'appel vocal en cours. */}
+        {/* Navigation Discord. Deux menus empilés, TOUJOURS visibles (même en
+            appel) :
+              1. Mode  : Vocal / Textuel  (en haut)
+              2. Source: Serveurs / MP    (partagé entre les deux modes)
+            Le contenu = mode × source. En appel actif, l'onglet Vocal affiche
+            d'abord l'appel en cours ; « Parcourir » révèle le menu Serveurs/MP
+            sans raccrocher. */}
         <div style={{ marginBottom: "12px" }}>
           <SR>
-            {/* Onglets de haut niveau (persistants) : Vocal / Messages */}
-            <div style={{ display: "flex", gap: 4, marginBottom: 6, width: "100%", boxSizing: "border-box" }}>
+            {/* 1. Menu de haut niveau (persistant) : Vocal / Textuel / Config.
+                Focusable + flow-children="horizontal" : la rangée devient UN arrêt
+                de nav vertical, gauche/droite circule entre les onglets (un <div>
+                flex de boutons bruts ne navigue que dans un sens à la manette). */}
+            <Focusable flow-children="horizontal" style={{ display: "flex", gap: 4, marginBottom: 6, width: "100%", boxSizing: "border-box" }}>
               <TabBtn
                 active={topTab === "voice"} focused={tabFocus === "top-voice"}
                 onClick={() => setTopTab("voice")}
@@ -466,19 +478,27 @@ const Content = () => {
                 {inCall ? "📞" : "🎧"} {t("tab_voice")}
               </TabBtn>
               <TabBtn
-                active={topTab === "convs"} focused={tabFocus === "top-convs"}
-                onClick={() => setTopTab("convs")}
-                onFocus={() => setTabFocus("top-convs")}
-                onBlur={() => setTabFocus((f) => (f === "top-convs" ? null : f))}
+                active={topTab === "text"} focused={tabFocus === "top-text"}
+                onClick={() => setTopTab("text")}
+                onFocus={() => setTabFocus("top-text")}
+                onBlur={() => setTabFocus((f) => (f === "top-text" ? null : f))}
               >
-                💬 {t("tab_conversations")}
+                💬 {t("tab_text")}
               </TabBtn>
-            </div>
+              <TabBtn
+                active={topTab === "config"} focused={tabFocus === "top-config"}
+                onClick={() => setTopTab("config")}
+                onFocus={() => setTabFocus("top-config")}
+                onBlur={() => setTabFocus((f) => (f === "top-config" ? null : f))}
+              >
+                ⚙️
+              </TabBtn>
+            </Focusable>
 
-            {topTab === "convs" ? (
-              // ── Messagerie texte : accessible à tout moment, même en appel ──
-              <TextChat embedded />
-            ) : inCall && !browsing ? (
+            {topTab === "config" ? (
+              // ── Onglet Config : réglages regroupés (mises à jour, etc.) ──
+              <ConfigPanel />
+            ) : topTab === "voice" && inCall && !browsing ? (
               // ── Onglet Vocal, en appel : vue de l'appel en cours ──
               <>
                 <VoiceChatChannel />
@@ -499,9 +519,10 @@ const Content = () => {
                 </div>
               </>
             ) : (
-              // ── Onglet Vocal, navigation : browser Serveurs / MP ──
+              // ── Vue navigation (Vocal hors-appel/parcourir OU Textuel) ──
               <>
-                {inCall && (
+                {/* En appel : revenir à la vue de l'appel sans raccrocher. */}
+                {topTab === "voice" && inCall && (
                   <div style={{ marginBottom: 6 }}>
                     <WideBtn
                       onClick={() => setBrowsing(false)}
@@ -513,39 +534,105 @@ const Content = () => {
                     </WideBtn>
                   </div>
                 )}
-                {/* Sous-bascule Serveurs / MP */}
-                <div style={{ display: "flex", gap: 4, marginBottom: 6, width: "100%", boxSizing: "border-box" }}>
+                {/* 2. Menu source (partagé) : Serveurs / MP */}
+                <Focusable flow-children="horizontal" style={{ display: "flex", gap: 4, marginBottom: 6, width: "100%", boxSizing: "border-box" }}>
                   <TabBtn
-                    active={voiceTab === "servers"} focused={tabFocus === "servers"}
-                    onClick={() => setVoiceTab("servers")}
+                    active={srcTab === "servers"} focused={tabFocus === "servers"}
+                    onClick={() => setSrcTab("servers")}
                     onFocus={() => setTabFocus("servers")}
                     onBlur={() => setTabFocus((f) => (f === "servers" ? null : f))}
                   >
-                    🔊 {t("tab_servers")}
+                    🏠 {t("tab_servers")}
                   </TabBtn>
                   <TabBtn
-                    active={voiceTab === "dms"} focused={tabFocus === "dms"}
-                    onClick={() => setVoiceTab("dms")}
+                    active={srcTab === "dms"} focused={tabFocus === "dms"}
+                    onClick={() => setSrcTab("dms")}
                     onFocus={() => setTabFocus("dms")}
                     onBlur={() => setTabFocus((f) => (f === "dms" ? null : f))}
                   >
-                    💬 {t("tab_dms")}
+                    👤 {t("tab_dms")}
                   </TabBtn>
-                </div>
-                {voiceTab === "servers" ? <ChannelBrowser /> : <DMBrowser />}
+                </Focusable>
+                {/* Contenu = mode × source. La clé force un remontage propre au
+                    changement de source (réinitialise la conversation ouverte).
+                    Le partage de captures n'apparaît QUE dans Textuel (envoi vers
+                    le salon/conversation en cours). */}
+                {topTab === "voice"
+                  ? (srcTab === "servers" ? <ChannelBrowser /> : <DMBrowser />)
+                  : (
+                    <>
+                      <TextChat key={srcTab} source={srcTab} />
+                      <hr />
+                      <SR>
+                        <UploadScreenshot />
+                      </SR>
+                    </>
+                  )}
               </>
             )}
           </SR>
         </div>
-        <hr />
-        <SR>
-          <UploadScreenshot />
-        </SR>
-        <hr />
-        <UpdaterSection />
       </SP>
     );
   }
+};
+
+// Panneau « Config » : réglages regroupés, accessibles via l'onglet ⚙️.
+// Aujourd'hui : mises à jour (auto + manuel). Prévu pour accueillir d'autres
+// réglages (ex. suivi du statut Steam).
+// Sélection des périphériques audio (sortie/entrée) pour Discord. Discord ne voit
+// que "Default" en headless → on liste les périphériques SYSTÈME (PipeWire) et le
+// backend route le flux Vesktop par-application (ex. son Discord → casque seul).
+const AudioDevicesConfig = () => {
+  const [dev, setDev] = useState<any>(null);
+  const [outSel, setOutSel] = useState<string>("auto");
+  const [inSel, setInSel] = useState<string>("auto");
+
+  const load = () => {
+    call<[], any>("get_audio_devices").then((d) => {
+      if (d && !d.error) { setDev(d); setOutSel(d.selected_output || "auto"); setInSel(d.selected_input || "auto"); }
+    }).catch(() => {});
+  };
+  useEffect(() => { load(); }, []);
+
+  if (!dev) return null;
+  const opt = (arr: any[]) => [{ data: "auto", label: t("audio_auto") }, ...(arr || []).map((o: any) => ({ data: o.name, label: o.label }))];
+
+  return (
+    <>
+      <SR><div style={{ fontSize: 12, opacity: 0.85, margin: "2px 0" }}>🔊 {t("audio_output")}</div></SR>
+      <SR>
+        <Dropdown rgOptions={opt(dev.outputs) as any} selectedOption={outSel}
+          onChange={(e: any) => { setOutSel(e.data); call("set_audio_output", e.data).catch(() => {}); }} />
+      </SR>
+      <SR><div style={{ fontSize: 12, opacity: 0.85, margin: "6px 0 2px" }}>🎙️ {t("audio_input")}</div></SR>
+      <SR>
+        <Dropdown rgOptions={opt(dev.inputs) as any} selectedOption={inSel}
+          onChange={(e: any) => { setInSel(e.data); call("set_audio_input", e.data).catch(() => {}); }} />
+      </SR>
+    </>
+  );
+};
+
+const ConfigPanel = () => {
+  return (
+    <div>
+      <SR>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>🎮 {t("config_status")}</div>
+      </SR>
+      <StatusAutoToggle />
+      <hr />
+      <SR>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>🎧 {t("config_audio")}</div>
+      </SR>
+      <AudioDevicesConfig />
+      <hr />
+      <SR>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>🔄 {t("config_updates")}</div>
+      </SR>
+      <UpdaterSection />
+    </div>
+  );
 };
 
 export default definePlugin(() => {

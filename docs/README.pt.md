@@ -51,10 +51,7 @@ Ir para o nativo resolve os problemas difíceis da antiga abordagem de navegador
 O Vesktop é instalado e iniciado automaticamente pelo plugin na primeira vez. Basta fazer login uma vez (QR ou tela cheia) e você permanece conectado.
 
 ### Requisito (compartilhamento de tela)
-O servidor de compartilhamento usa o Python do sistema + GStreamer. Instale as dependências do Python uma vez:
-```bash
-python -m pip install --user aiohttp aiohttp_cors
-```
+A partilha de ecrã funciona logo — o plugin instala automaticamente a sua dependência Python (aiohttp) no primeiro arranque. O GStreamer é fornecido pelo sistema.
 
 ---
 

@@ -1,6 +1,6 @@
 import { DialogButton } from "@decky/ui";
 import { useSteamcordState } from "../../hooks/useSteamcordState";
-import { FaVideo, FaVideoSlash } from "react-icons/fa";
+import { FaDesktop, FaStop } from "react-icons/fa";
 import { call } from "@decky/api";
 import { t } from "../../i18n";
 
@@ -25,7 +25,7 @@ export function GoLiveButton() {
         background: live ? "#ed4245" : "rgba(88,101,242,0.35)",
       }}
     >
-      {live ? <FaVideoSlash /> : <FaVideo />}
+      {live ? <FaStop /> : <FaDesktop />}
       {live ? t("go_live_stop") : t("go_live_start")}
     </Btn>
   );

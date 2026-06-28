@@ -1,63 +1,71 @@
 (() => {
     let waitingForMedia = false;
+    // Surcharge getDisplayMedia : au lieu du picker natif (inutilisable dans un
+    // Vesktop minimisé/gamescope), on tire la capture d'écran complète produite
+    // par GStreamer (gst_webrtc.py) via WebRTC local sur 65124.
     const getRTCStream = (_) => new Promise((resolve, reject) => {
         if (window.STEAMCORD_RTC_STREAM) return resolve(window.STEAMCORD_RTC_STREAM);
-        
         if (waitingForMedia) return reject();
         waitingForMedia = true;
 
         const peerConnection = new RTCPeerConnection(null);
         const ws = new WebSocket("ws://127.0.0.1:65124/webrtc");
-
         window.STEAMCORD_PEER_CONNECTION = peerConnection;
 
-        ws.onopen = async (_) => {
-            const offer = await peerConnection.createOffer({ offerToReceiveVideo: true, offerToReceiveAudio: true });
-            await peerConnection.setLocalDescription(offer);
-            ws.send(JSON.stringify({ "offer": offer }));
+        const inbound = new MediaStream();
 
-            peerConnection.addEventListener("icecandidate", event => {
-                if (event.candidate) {
-                    ws.send(JSON.stringify({ "ice": event.candidate }));
-                }
-            });
-        }
-        ws.onmessage = async (event) => {
-            const data = JSON.parse(event.data);
-            if (data.sdp) {
-                const remoteDescription = new RTCSessionDescription(data.sdp);
-                console.log(remoteDescription);
-                await peerConnection.setRemoteDescription(remoteDescription);
+        // API moderne (Chrome 144) : ontrack remplace onaddstream (supprimé).
+        peerConnection.ontrack = (ev) => {
+            inbound.addTrack(ev.track);
+            // Attendre la piste vidéo avant de résoudre (l'audio peut arriver avant).
+            if (inbound.getVideoTracks().length === 0) return;
+            window.STEAMCORD_RTC_STREAM = inbound;
+            for (const track of inbound.getTracks()) {
+                track.stop = () => {
+                    try { ws.send(JSON.stringify({ "stop": "" })); } catch (_) {}
+                    try { peerConnection.close(); } catch (_) {}
+                    window.STEAMCORD_RTC_STREAM = undefined;
+                };
             }
-            else if (data.ice) {
-                console.log(data.ice);
-                await peerConnection.addIceCandidate(data.ice);
-            }
-        }
+            waitingForMedia = false;
+            resolve(inbound);
+        };
 
-        peerConnection.onconnectionstatechange = (ev) => {
-            if (peerConnection.connectionState == "failed") {
+        // Poser le listener ICE AVANT createOffer (sinon candidats précoces perdus).
+        peerConnection.addEventListener("icecandidate", (event) => {
+            if (event.candidate) ws.send(JSON.stringify({ "ice": event.candidate }));
+        });
+
+        peerConnection.onconnectionstatechange = () => {
+            if (peerConnection.connectionState === "failed") {
                 waitingForMedia = false;
                 reject("rtc peer connection failed");
             }
-        }
+        };
 
-        peerConnection.onaddstream = (ev) => {
-            const stream = ev.stream;
-            if (stream.getVideoTracks().length == 0) return;
+        ws.onopen = async () => {
+            // recvonly : on REÇOIT la vidéo+audio de GStreamer (remplace les
+            // options obsolètes offerToReceiveVideo/Audio de createOffer).
+            peerConnection.addTransceiver("video", { direction: "recvonly" });
+            peerConnection.addTransceiver("audio", { direction: "recvonly" });
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            ws.send(JSON.stringify({ "offer": offer }));
+        };
 
-            window.STEAMCORD_RTC_STREAM = stream;
-            for (const track of stream.getTracks()) {
-                track.stop = () => {
-                    ws.send(JSON.stringify({"stop": ""}));
-                    peerConnection.close();
-                    window.STEAMCORD_RTC_STREAM = undefined;
-                }
+        ws.onmessage = async (event) => {
+            const data = JSON.parse(event.data);
+            if (data.sdp) {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            } else if (data.ice) {
+                try { await peerConnection.addIceCandidate(data.ice); } catch (_) {}
             }
-            waitingForMedia = false;
-            resolve(stream);
-        }
+        };
+
+        ws.onerror = () => { waitingForMedia = false; reject("ws error"); };
     });
 
-    window.navigator.mediaDevices.getDisplayMedia = getRTCStream;
+    if (window.navigator?.mediaDevices) {
+        window.navigator.mediaDevices.getDisplayMedia = getRTCStream;
+    }
 })();

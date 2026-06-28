@@ -1,7 +1,10 @@
 import { call } from "@decky/api";
-import { DialogButton, Dropdown, DropdownOption } from "@decky/ui";
-import { useEffect, useMemo, useState } from "react";
+import { DialogButton } from "@decky/ui";
+import { useEffect, useState } from "react";
 import { t } from "../i18n";
+import { currentTextChannel, onTextChannelChange } from "./TextChat";
+
+declare const SteamClient: any;
 
 function urlContentToDataUri(url: string) {
   return fetch(url)
@@ -18,34 +21,23 @@ function urlContentToDataUri(url: string) {
     );
 }
 
+// Partage de capture : envoie la dernière capture Steam vers la conversation
+// texte ACTUELLEMENT ouverte (currentTextChannel). Plus de sélecteur de salon —
+// la cible suit le salon où on est.
 export function UploadScreenshot() {
   const [screenshot, setScreenshot] = useState<any>();
-  const [selectedChannel, setChannel] = useState<any>();
-  const [uploadButtonDisabled, setUploadButtonDisabled] =
-    useState<boolean>(false);
-  const channels = useMemo((): DropdownOption[] => [], []);
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [target, setTarget] = useState(currentTextChannel);
 
   useEffect(() => {
-    call<[], Record<string, any>>("get_last_channels")
-      .then(res => {
-        if ("error" in res)
-          return;
-
-        const channelList = res;
-        console.log(channelList);
-        for (const channelId in channelList) {
-          console.log(channelId);
-          channels.push({ data: channelId, label: channelList[channelId] });
-        }
-          
-
-        if (channels.length > 0) setChannel(channels[0].data);
-      });
-
+    const unsub = onTextChannelChange(() => { setTarget(currentTextChannel); setSent(false); });
+    setTarget(currentTextChannel);
     SteamClient.Screenshots.GetLastScreenshotTaken().then((res: any) => setScreenshot(res));
+    return unsub;
   }, []);
 
-  // Nothing to upload → render nothing at all
+  // Rien à partager → on n'affiche rien.
   if (!screenshot?.strUrl) return null;
 
   return (
@@ -59,56 +51,28 @@ export function UploadScreenshot() {
         height={160}
         style={{ borderRadius: 6, display: "block", maxWidth: "100%" }}
         src={"https://steamloopback.host/" + screenshot.strUrl}
-      ></img>
-      {Dropdown ? (
-        <Dropdown
-          menuLabel={t("last_channels")}
-          selectedOption={selectedChannel}
-          rgOptions={channels}
-          onChange={(e: { data: any; }) => {
-            setChannel(e.data);
-            if (window.location.pathname == "/routes/discord") {
-              window.DISCORD_TAB.m_browserView.SetVisible(true);
-              window.DISCORD_TAB.m_browserView.SetFocus(true);
-            }
-          }}
-          onMenuOpened={() => {
-            window.DISCORD_TAB.m_browserView.SetVisible(false);
-            window.DISCORD_TAB.m_browserView.SetFocus(false);
-          }}
-        />
+      />
+      {target ? (
+        <>
+          <div style={{ fontSize: 11, opacity: 0.7, margin: "5px 0" }}>
+            → {target.dm ? target.name : "#" + target.name}
+          </div>
+          <DialogButton
+            style={{ width: "100%", padding: "5px 0", fontSize: 12, minHeight: 0 }}
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              const data = await urlContentToDataUri(`https://steamloopback.host/${screenshot.strUrl}`);
+              await call("post_screenshot", target.id, data);
+              setBusy(false);
+              setSent(true);
+            }}
+          >
+            {busy ? "…" : sent ? "✓ " + t("upload") : t("upload")}
+          </DialogButton>
+        </>
       ) : (
-        <select value={selectedChannel} onChange={(e) => setChannel(e.target.value)}
-          style={{ width: "100%", padding: "4px", marginTop: "4px" }}>
-          {channels.map((ch: any) => <option key={ch.data} value={ch.data}>{ch.label}</option>)}
-        </select>
-      )}
-      {DialogButton ? (
-        <DialogButton
-          style={{ marginTop: "5px" }}
-          disabled={uploadButtonDisabled}
-          onClick={async () => {
-            setUploadButtonDisabled(true);
-            const data = await urlContentToDataUri(`https://steamloopback.host/${screenshot.strUrl}`);
-            await call("post_screenshot", selectedChannel, data);
-            setUploadButtonDisabled(false);
-          }}
-        >
-          {t("upload")}
-        </DialogButton>
-      ) : (
-        <button
-          style={{ marginTop: "5px", padding: "6px 12px", cursor: "pointer", width: "100%" }}
-          disabled={uploadButtonDisabled}
-          onClick={async () => {
-            setUploadButtonDisabled(true);
-            const data = await urlContentToDataUri(`https://steamloopback.host/${screenshot.strUrl}`);
-            await call("post_screenshot", selectedChannel, data);
-            setUploadButtonDisabled(false);
-          }}
-        >
-          {t("upload")}
-        </button>
+        <div style={{ fontSize: 11, opacity: 0.6, marginTop: 5 }}>{t("screenshot_open_channel")}</div>
       )}
     </div>
   );

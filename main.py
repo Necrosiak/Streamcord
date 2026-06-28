@@ -9,7 +9,7 @@ from asyncio import sleep, create_task, create_subprocess_exec
 import aiohttp_cors  # type: ignore
 from json import dumps
 from pathlib import Path
-from subprocess import PIPE
+from subprocess import PIPE, DEVNULL
 
 import sys
 import os
@@ -50,7 +50,14 @@ async def initialize():
     # instead of a hidden Steam CEF BrowserView (where the mic is impossible).
     import vesktop
     client_js = open(Path(DECKY_PLUGIN_DIR) / "steamcord_client.js", "r").read()
-    tab = await vesktop.get_discord_tab(client_js)
+    # webrtc_client.js surcharge getDisplayMedia → capture d'écran GStreamer pour
+    # le partage d'écran (Go Live). DOIT être injecté sous Vesktop aussi, sinon le
+    # partage d'écran « ne donne rien » (getDisplayMedia natif inutilisable headless).
+    try:
+        webrtc_js = open(Path(DECKY_PLUGIN_DIR) / "webrtc_client.js", "r").read()
+    except Exception:
+        webrtc_js = ""
+    tab = await vesktop.get_discord_tab(webrtc_js + "\n" + client_js)
 
     Plugin.discord_tab = tab
 
@@ -59,15 +66,28 @@ async def initialize():
 
 
 async def watchdog(tab: Tab):
+    import vesktop
     while True:
+        # `tab.websocket.closed` stays False on a half-broken CDP transport (the
+        # "Cannot write to closing transport" case seen when Vesktop dies but the
+        # socket lingers in a closing state). So ALSO probe Vesktop's CDP endpoint:
+        # if it stops answering, treat the tab as dead and fall through to recovery
+        # (re-initialize() relaunches Vesktop and re-injects the client).
         while not tab.websocket.closed:
-            await sleep(1)
+            await sleep(3)
+            if not await vesktop.is_up():
+                logger.info("Vesktop CDP stopped responding — treating Discord tab as dead.")
+                break
 
         logger.info("Discord tab websocket is no longer open. Trying to reconnect...")
 
         try:
-            await tab.open_websocket()
-            logger.info("Reconnected")
+            # Only a soft reconnect makes sense if Vesktop is actually alive.
+            if await vesktop.is_up():
+                await tab.open_websocket()
+                logger.info("Reconnected")
+            else:
+                break
 
         except:
             break
@@ -96,6 +116,10 @@ class Plugin:
     evt_handler = EventHandler()
     last_ws: WebSocketResponse = None
     discord_tab = None
+    # Routage audio par-application (PipeWire) : None = auto (suit le système).
+    _audio_out = None
+    _audio_in = None
+    _AUDIO_CFG = os.path.expanduser("~/.config/steamcord-audio.json")
 
     @classmethod
     async def _main(cls):
@@ -146,6 +170,19 @@ class Plugin:
                 "DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{uid}/bus"
             ),
         }
+        # Auto-install des dépendances du partage d'écran (self-contained sur toute
+        # BC-250 fraîche) AVANT de lancer gst_webrtc.py.
+        await cls._ensure_screenshare_deps()
+        # Tuer un gst_webrtc.py orphelin (restart de plugin_loader ne tue pas toujours
+        # l'enfant → port 65124 "address already in use"). Puis laisser le port se libérer.
+        try:
+            import vesktop
+            killer = await create_subprocess_exec("pkill", "-f", "gst_webrtc.py",
+                                                  stdout=DEVNULL, stderr=DEVNULL, env=vesktop._user_env())
+            await killer.wait()
+            await sleep(1)
+        except Exception:
+            pass
         cls.webrtc_server = await create_subprocess_exec(
             "/usr/bin/python",
             str(Path(DECKY_PLUGIN_DIR) / "gst_webrtc.py"),
@@ -158,6 +195,8 @@ class Plugin:
         create_task(cls._remote_auth_watcher())
         create_task(cls._audio_keepalive())
         create_task(cls._autoupdate_check())
+        cls._load_audio_cfg()
+        create_task(cls._audio_routing_watcher())
 
         async for state in cls.evt_handler.yield_new_state():
             await emit("state", state)
@@ -449,6 +488,145 @@ class Plugin:
     @classmethod
     async def send_message(cls, channel_id, content):
         return await cls.evt_handler.api.send_message(channel_id, content)
+
+    @classmethod
+    async def get_local_mute(cls, user_id):
+        return await cls.evt_handler.api.get_local_mute(user_id)
+
+    @classmethod
+    async def toggle_local_mute(cls, user_id):
+        return await cls.evt_handler.api.toggle_local_mute(user_id)
+
+    # ── Sélection des périphériques audio (sortie/entrée) pour Discord ──────────
+    # Discord/Vesktop ne voit que "Default" en headless → on pilote au niveau
+    # SYSTÈME via PipeWire (pactl), en routant les flux de Vesktop par-application.
+    # Ça permet p.ex. d'envoyer le son Discord UNIQUEMENT vers le casque.
+    @classmethod
+    async def _pactl(cls, *args, want_json=False):
+        import vesktop
+        pre = ("-f", "json") if want_json else ()
+        p = await create_subprocess_exec("pactl", *pre, *args, stdout=PIPE, stderr=DEVNULL, env=vesktop._user_env())
+        out, _ = await p.communicate()
+        return out.decode()
+
+    @staticmethod
+    def _dev_label(d):
+        desc = d.get("description")
+        return desc if desc and desc != "(null)" else d.get("name", "")
+
+    @classmethod
+    async def get_audio_devices(cls):
+        from json import loads
+        try:
+            sinks = loads(await cls._pactl("list", "sinks", want_json=True) or "[]")
+            sources = loads(await cls._pactl("list", "sources", want_json=True) or "[]")
+            def_sink = (await cls._pactl("get-default-sink")).strip()
+            def_source = (await cls._pactl("get-default-source")).strip()
+        except Exception as e:
+            return {"error": str(e)}
+        outputs = [{"name": s.get("name", ""), "label": cls._dev_label(s)} for s in sinks]
+        # Entrées : exclure les monitors (rebouclage de sortie, pas un vrai micro).
+        inputs = [{"name": s.get("name", ""), "label": cls._dev_label(s)}
+                  for s in sources if not s.get("name", "").endswith(".monitor")]
+        return {
+            "outputs": outputs, "inputs": inputs,
+            "default_output": def_sink, "default_input": def_source,
+            "selected_output": cls._audio_out or "auto",
+            "selected_input": cls._audio_in or "auto",
+        }
+
+    @classmethod
+    async def set_audio_output(cls, name):
+        cls._audio_out = None if name in (None, "auto") else name
+        cls._save_audio_cfg()
+        await cls._apply_audio_routing()
+        return True
+
+    @classmethod
+    async def set_audio_input(cls, name):
+        cls._audio_in = None if name in (None, "auto") else name
+        cls._save_audio_cfg()
+        await cls._apply_audio_routing()
+        return True
+
+    @staticmethod
+    def _is_vesktop_stream(s):
+        props = s.get("properties", {}) or {}
+        blob = " ".join(str(v) for v in props.values()).lower()
+        return ("vesktop" in blob) or ("discord" in blob) or ("electron" in blob)
+
+    @classmethod
+    async def _apply_audio_routing(cls):
+        from json import loads
+        try:
+            if cls._audio_out:
+                for si in loads(await cls._pactl("list", "sink-inputs", want_json=True) or "[]"):
+                    if cls._is_vesktop_stream(si):
+                        await cls._pactl("move-sink-input", str(si.get("index")), cls._audio_out)
+            if cls._audio_in:
+                for so in loads(await cls._pactl("list", "source-outputs", want_json=True) or "[]"):
+                    if cls._is_vesktop_stream(so):
+                        await cls._pactl("move-source-output", str(so.get("index")), cls._audio_in)
+        except Exception as e:
+            logger.warning(f"audio routing failed: {e!r}")
+
+    @classmethod
+    async def _audio_routing_watcher(cls):
+        # Les flux Vesktop apparaissent/disparaissent (à chaque appel) → on ré-applique
+        # le routage périodiquement pour qu'un nouveau flux suive le choix de l'user.
+        while True:
+            try:
+                if cls._audio_out or cls._audio_in:
+                    await cls._apply_audio_routing()
+            except Exception:
+                pass
+            await sleep(4)
+
+    @classmethod
+    def _load_audio_cfg(cls):
+        from json import load
+        try:
+            with open(cls._AUDIO_CFG) as f:
+                cfg = load(f)
+            cls._audio_out = cfg.get("output") or None
+            cls._audio_in = cfg.get("input") or None
+        except Exception:
+            pass
+
+    @classmethod
+    def _save_audio_cfg(cls):
+        from json import dump
+        try:
+            os.makedirs(os.path.dirname(cls._AUDIO_CFG), exist_ok=True)
+            with open(cls._AUDIO_CFG, "w") as f:
+                dump({"output": cls._audio_out, "input": cls._audio_in}, f)
+        except Exception as e:
+            logger.warning(f"save audio cfg failed: {e!r}")
+
+    @classmethod
+    async def _ensure_screenshare_deps(cls):
+        # gst_webrtc.py tourne sous le SYSTEM /usr/bin/python (requis pour les bindings
+        # GStreamer `gi`, absents du python embarqué du plugin). Sur une machine fraîche
+        # cet interpréteur n'a pas aiohttp → partage d'écran muet. On l'installe
+        # automatiquement en user-site (sans root) → plugin self-contained sur toute BC-250.
+        import vesktop
+        env = vesktop._user_env()
+        try:
+            check = await create_subprocess_exec(
+                "/usr/bin/python", "-c", "import aiohttp, aiohttp_cors",
+                stdout=DEVNULL, stderr=DEVNULL, env=env,
+            )
+            if (await check.wait()) == 0:
+                return
+            logger.info("Screen-share deps missing — installing aiohttp (user-site) for system python…")
+            proc = await create_subprocess_exec(
+                "/usr/bin/python", "-m", "pip", "install", "--user", "--quiet",
+                "aiohttp", "aiohttp_cors",
+                stdout=DEVNULL, stderr=DEVNULL, env=env,
+            )
+            await proc.wait()
+        except Exception as e:
+            logger.warning(f"Screen-share deps auto-install failed: {e!r}")
 
     @classmethod
     async def go_live(cls):

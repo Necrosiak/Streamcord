@@ -50,11 +50,8 @@ Going native fixes the hard problems of the old hidden-browser approach: **your 
 
 Vesktop is installed and launched automatically by the plugin the first time it runs. Just log in once (QR or fullscreen) and you stay logged in.
 
-### Requirement (screen share)
-The screen-share server uses the system Python + GStreamer. Install the Python deps once:
-```bash
-python -m pip install --user aiohttp aiohttp_cors
-```
+### Screen share
+Screen sharing works out of the box — the plugin auto-installs its Python dependency (aiohttp) for the system Python on first run. GStreamer is provided by the system.
 
 ---
 

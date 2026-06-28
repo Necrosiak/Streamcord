@@ -303,6 +303,19 @@ window.Vencord.Plugins.plugins.Steamcord = {
                                 case "$set_user_volume":
                                     FluxDispatcher.dispatch({ type: "AUDIO_SET_LOCAL_VOLUME", userId: data.id, volume: data.volume });
                                     return;
+                                case "$get_local_mute": {
+                                    // Mute LOCAL (côté client seulement : on ne les entend plus, eux ne le savent pas).
+                                    const MES = Vencord.Webpack.findStore("MediaEngineStore");
+                                    result = !!(MES && MES.isLocalMute && MES.isLocalMute(data.id));
+                                    break;
+                                }
+                                case "$toggle_local_mute": {
+                                    const mod = Vencord.Webpack.findByProps("toggleLocalMute");
+                                    if (mod && mod.toggleLocalMute) mod.toggleLocalMute(data.id);
+                                    const MES = Vencord.Webpack.findStore("MediaEngineStore");
+                                    result = !!(MES && MES.isLocalMute && MES.isLocalMute(data.id)); // nouvel état
+                                    break;
+                                }
                                 case "$set_status": {
                                     // data.status: "online" | "idle" | "dnd" | "invisible"
                                     try {
@@ -489,16 +502,32 @@ window.Vencord.Plugins.plugins.Steamcord = {
                                     // on inverse pour l'ordre de lecture). Timestamps ISO.
                                     const res = await Vencord.Webpack.Common.RestAPI.get({ url: `/channels/${data.id}/messages?limit=30` });
                                     const arr = (res?.body || []).slice().reverse();
-                                    result = arr.map(m => ({
-                                        id: String(m.id),
-                                        author: m.author?.global_name || m.author?.username || "?",
-                                        author_id: String(m.author?.id || ""),
-                                        avatar: m.author?.avatar || null,
-                                        bot: !!m.author?.bot,
-                                        content: m.content ?? "",
-                                        ts: m.timestamp || null,
-                                        attachments: Array.isArray(m.attachments) ? m.attachments.length : 0,
-                                    }));
+                                    const isImg = (a) => (a?.content_type || "").startsWith("image/")
+                                        || /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(a?.filename || a?.url || "");
+                                    result = arr.map(m => {
+                                        const atts = Array.isArray(m.attachments) ? m.attachments : [];
+                                        // Images = pièces jointes image + images d'embeds (liens d'images
+                                        // postés deviennent des embeds). proxy_url = CDN média redimensionnable.
+                                        const images = [];
+                                        for (const a of atts) {
+                                            if (isImg(a)) images.push({ url: a.url, proxy_url: a.proxy_url || a.url, w: a.width || 0, h: a.height || 0 });
+                                        }
+                                        for (const e of (Array.isArray(m.embeds) ? m.embeds : [])) {
+                                            const im = e?.image || e?.thumbnail;
+                                            if (im && im.url) images.push({ url: im.url, proxy_url: im.proxy_url || im.url, w: im.width || 0, h: im.height || 0 });
+                                        }
+                                        return {
+                                            id: String(m.id),
+                                            author: m.author?.global_name || m.author?.username || "?",
+                                            author_id: String(m.author?.id || ""),
+                                            avatar: m.author?.avatar || null,
+                                            bot: !!m.author?.bot,
+                                            content: m.content ?? "",
+                                            ts: m.timestamp || null,
+                                            images,
+                                            files: atts.filter(a => !isImg(a)).length,
+                                        };
+                                    });
                                     break;
                                 }
                                 case "$send_message": {

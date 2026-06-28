@@ -51,10 +51,7 @@ Il passaggio al nativo risolve i problemi difficili del vecchio approccio a brow
 Vesktop viene installato e avviato automaticamente dal plugin al primo avvio. Accedi una sola volta (QR o schermo intero) e resti connesso.
 
 ### Requisito (condivisione schermo)
-Il server di condivisione usa il Python di sistema + GStreamer. Installa le dipendenze Python una volta:
-```bash
-python -m pip install --user aiohttp aiohttp_cors
-```
+La condivisione dello schermo funziona subito: il plugin installa automaticamente la sua dipendenza Python (aiohttp) al primo avvio. GStreamer è fornito dal sistema.
 
 ---
 

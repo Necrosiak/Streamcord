@@ -51,10 +51,7 @@ Der Wechsel zu nativem Code löst die schwierigen Probleme des alten Ansatzes mi
 Vesktop wird beim ersten Start automatisch vom Plugin installiert und gestartet. Melde dich einmal an (QR oder Vollbild) und du bleibst angemeldet.
 
 ### Voraussetzung (Bildschirmübertragung)
-Der Übertragungsserver nutzt das System-Python + GStreamer. Installiere die Python-Abhängigkeiten einmalig:
-```bash
-python -m pip install --user aiohttp aiohttp_cors
-```
+Die Bildschirmfreigabe funktioniert sofort — das Plugin installiert seine Python-Abhängigkeit (aiohttp) beim ersten Start automatisch. GStreamer kommt vom System.
 
 ---
 

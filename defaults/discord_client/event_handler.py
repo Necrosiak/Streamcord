@@ -212,11 +212,13 @@ class EventHandler:
             user_id = vs["userId"]
             channel_id = vs.get("channelId")
 
-            # Our own voice state changed: we may have been moved or force-disconnected
-            # by joining voice on another device (PC, phone). Discord doesn't always emit
-            # VOICE_CHANNEL_SELECT in that case, so reconcile our local VC state here.
-            if user_id == self.me.id and channel_id != self.vc_channel_id:
-                await self._voice_channel_select({"channelId": channel_id})
+            # Skip our OWN voice state here: VOICE_STATE_UPDATES reflects ACCOUNT-level
+            # presence, so it also reports voice connections on OTHER devices (PC, phone).
+            # Reconciling from it made the BC show "in call" while we were actually
+            # connected elsewhere. The JS poller tracks the LOCAL connection via
+            # SelectedChannelStore.getVoiceChannelId() and emits VOICE_CHANNEL_SELECT —
+            # that is the single source of truth for "in call on THIS machine".
+            if user_id == self.me.id:
                 continue
 
             if channel_id == self.vc_channel_id:

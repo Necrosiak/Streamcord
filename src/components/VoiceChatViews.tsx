@@ -1,10 +1,11 @@
 import { call } from "@decky/api";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSteamcordState } from "../hooks/useSteamcordState";
 import { t } from "../i18n";
-import { SliderField } from "@decky/ui";
+import { SliderField, DialogButton } from "@decky/ui";
 
 const SliderFieldAny = SliderField as any;
+const Btn = DialogButton as any;
 
 export function VoiceChatChannel() {
   const state = useSteamcordState();
@@ -18,16 +19,36 @@ export function VoiceChatChannel() {
   );
 }
 
-function UserRow({ user }: { user: any }) {
+function UserRow({ user, isSelf }: { user: any; isSelf?: boolean }) {
   const [volume, setVolume] = useState<number>(100);
+  // Mute LOCAL : on ne l'entend plus, de NOTRE côté seulement (lui ne le sait pas).
+  const [localMuted, setLocalMuted] = useState<boolean>(false);
 
   const speaking = user?.is_speaking;
   const muted = user?.is_muted;
   const deafened = user?.is_deafened;
 
+  // État initial du mute local (persiste côté Discord) au montage de la ligne.
+  // Inutile pour soi-même (on ne se mute pas localement).
+  useEffect(() => {
+    if (isSelf) return;
+    call<[string], boolean>("get_local_mute", user.id)
+      .then((r) => setLocalMuted(!!r))
+      .catch(() => {});
+  }, [user.id, isSelf]);
+
   const onVolumeChange = async (val: number) => {
     setVolume(val);
     await call("set_user_volume", user.id, val);
+  };
+
+  const toggleLocalMute = async () => {
+    // Optimiste, puis on aligne sur l'état réel renvoyé par Discord.
+    setLocalMuted((m) => !m);
+    try {
+      const r = await call<[string], boolean>("toggle_local_mute", user.id);
+      setLocalMuted(!!r);
+    } catch { setLocalMuted((m) => !m); }
   };
 
   return (
@@ -72,17 +93,31 @@ function UserRow({ user }: { user: any }) {
           }} />
         )}
       </div>
-      {/* Gamepad-navigable volume (how loud YOU hear this person — not their mic) */}
-      <div style={{ padding: "0 4px", boxSizing: "border-box", maxWidth: "100%", overflow: "hidden" }}>
-        <SliderFieldAny
-          label={`🔊 ${volume}%`}
-          value={volume}
-          min={0}
-          max={200}
-          step={5}
-          onChange={onVolumeChange}
-          bottomSeparator="none"
-        />
+      {/* Volume (à quel point TU l'entends) + bouton mute LOCAL à droite. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "0 4px", boxSizing: "border-box", maxWidth: "100%", overflow: "hidden" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <SliderFieldAny
+            label={`🔊 ${volume}%`}
+            value={volume}
+            min={0}
+            max={200}
+            step={5}
+            onChange={onVolumeChange}
+            bottomSeparator="none"
+          />
+        </div>
+        {/* Mute local : pas de sens pour soi-même → masqué sur sa propre ligne. */}
+        {!isSelf && (
+          <Btn
+            onClick={toggleLocalMute}
+            style={{
+              flexShrink: 0, minWidth: 0, minHeight: 0, padding: "4px 8px", fontSize: 14, lineHeight: 1,
+              background: localMuted ? "#ed4245" : "rgba(255,255,255,0.08)",
+            }}
+          >
+            {localMuted ? "🔇" : "🎙️"}
+          </Btn>
+        )}
       </div>
     </li>
   );
@@ -91,10 +126,11 @@ function UserRow({ user }: { user: any }) {
 export function VoiceChatMembers() {
   const state = useSteamcordState();
   if (!state?.vc?.users) return <div />;
+  const meId = state?.me?.id;
   return (
     <ul style={{ margin: 0, padding: 0 }}>
       {state.vc.users.map((user: any) => (
-        <UserRow key={user.id} user={user} />
+        <UserRow key={user.id} user={user} isSelf={user.id === meId} />
       ))}
     </ul>
   );
