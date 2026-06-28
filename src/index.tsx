@@ -74,7 +74,6 @@ declare global {
 // Safe wrappers for @decky/ui components that may be undefined after a Steam update
 const SP = PanelSection || ((p: any) => <div>{p.children}</div>);
 const SR = PanelSectionRow || ((p: any) => <div>{p.children}</div>);
-const SF = (p: any) => <div style={p.style}>{p.children}</div>;
 
 const NotLoggedIn = ({ qr_login, captcha_needed }: { qr_login?: string; captcha_needed?: boolean }) => {
   if (captcha_needed) { call("show_discord_login").catch(() => {}); }
@@ -699,7 +698,19 @@ export default definePlugin(() => {
       console.log("Dispatching Steamcord notification: ", payload);
       // Incoming DM call: localize the title to the SteamOS language.
       const title = payload.kind === "call" ? `📞 ${t("incoming_call")}` : payload.title;
-      toaster.toast({ title, body: payload.body });
+      const isCall = payload.kind === "call";
+      // Options explicites : sans elles le toast était seulement journalisé (visible
+      // dans le panneau de notifs Steam) mais peu/pas affiché en jeu. duration longue,
+      // son + popup forcé ; les appels entrants sont marqués critical (priorité haute).
+      toaster.toast({
+        title,
+        body: payload.body,
+        duration: isCall ? 15000 : 6000,
+        critical: isCall,
+        playSound: true,
+        sound: 6,
+        showToast: true,
+      } as any);
     },
     MIC_PEER_CONNECTION: undefined,
   };
