@@ -217,6 +217,7 @@ class Plugin:
         create_task(cls._autoupdate_check())
         cls._load_audio_cfg()
         create_task(cls._audio_routing_watcher())
+        create_task(cls._screen_diag())
 
         async for state in cls.evt_handler.yield_new_state():
             await emit("state", state)
@@ -530,6 +531,35 @@ class Plugin:
     @classmethod
     async def set_local_mute(cls, user_id, muted):
         return await cls.evt_handler.api.set_local_mute(user_id, muted)
+
+    @classmethod
+    async def _screen_diag(cls):
+        # Diagnostic capture d'écran : log périodiquement si on est en mode JEU
+        # (gamescope) et quels nodes vidéo PipeWire existent. Tourne dans plugin_loader
+        # (survit aux changements de mode) → capture l'état mode jeu même offline.
+        from json import loads
+        import vesktop
+        while True:
+            try:
+                g = await create_subprocess_exec("pgrep", "-x", "gamescope", stdout=DEVNULL, stderr=DEVNULL)
+                in_game = (await g.wait()) == 0
+                vids = []
+                try:
+                    p = await create_subprocess_exec("pw-dump", stdout=PIPE, stderr=DEVNULL, env=vesktop._user_env())
+                    out, _ = await p.communicate()
+                    for n in loads(out.decode() or "[]"):
+                        if not str(n.get("type", "")).endswith("Node"):
+                            continue
+                        pr = (n.get("info", {}) or {}).get("props", {}) or {}
+                        mc = str(pr.get("media.class", "")); nm = str(pr.get("node.name", ""))
+                        if "Video" in mc or "gamescope" in (nm + mc).lower() or "screen" in nm.lower():
+                            vids.append(f"{n.get('id')}:{nm}:{mc}")
+                except Exception as e:
+                    vids = [f"pw-dump err {e!r}"]
+                logger.info(f"[screendiag] gamescope={in_game} video_nodes={vids}")
+            except Exception as e:
+                logger.warning(f"[screendiag] {e!r}")
+            await sleep(15)
 
     @classmethod
     async def logout_discord(cls):
