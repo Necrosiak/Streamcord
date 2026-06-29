@@ -930,7 +930,10 @@ window.Vencord.Plugins.plugins.Steamcord = {
                         if (Math.max(r, g, b) - Math.min(r, g, b) > 40) colorful++;
                         total++;
                     }
-                    return total > 0 && (colorful / total) < 0.12; // QR ≈ pure B/W
+                    // Le vrai QR est quasi N/B (~0.1 « coloré », petit logo central) ;
+                    // le placeholder de chargement = grille de formes colorées (~0.43).
+                    // Seuil 0.25 = laisse passer le vrai QR, écarte le placeholder.
+                    return total > 0 && (colorful / total) < 0.25;
                 } catch (e) { return true; }
             };
             let lastUrl = null;
