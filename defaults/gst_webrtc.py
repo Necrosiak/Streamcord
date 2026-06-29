@@ -22,12 +22,45 @@ from gi.repository import Gst, GstWebRTC, GstSdp # type: ignore
 PIPELINE_DESC = """
   webrtcbin name=send latency=0 stun-server=stun://stun.l.google.com:19302
   turn-server=turn://gstreamer:IsGreatWhenYouCanGetItToWork@webrtc.nirbheek.in:3478
-  pipewiresrc do-timestamp=true ! videoconvert ! queue !
+  {video_src} do-timestamp=true ! videoconvert ! queue !
   vp8enc deadline=1 keyframe-max-dist=2000 ! rtpvp8pay picture-id-mode=15-bit !
   queue ! application/x-rtp,media=video,encoding-name=VP8,payload={video_pt} ! send.
   pulsesrc device="{monitor}" ! audioconvert ! audioresample ! queue ! opusenc ! rtpopuspay !
   queue ! application/x-rtp,media=audio,encoding-name=OPUS,payload={audio_pt} ! send.
 """
+
+
+def _find_screen_node():
+    """Trouve le node PipeWire de l'écran (gamescope publie l'écran complet en mode
+    jeu Steam → capturable SANS portail/dialogue). Log tous les nodes vidéo pour
+    diagnostic. Renvoie l'id du node (str) ou None (→ pipewiresrc par défaut)."""
+    import json
+    from subprocess import getoutput
+    try:
+        data = json.loads(getoutput("pw-dump"))
+    except Exception as e:
+        log.warning(f"[screen] pw-dump KO: {e!r}")
+        return None
+    vids = []
+    for n in data:
+        if not str(n.get("type", "")).endswith("Node"):
+            continue
+        p = (n.get("info", {}) or {}).get("props", {}) or {}
+        mc = str(p.get("media.class", ""))
+        name = str(p.get("node.name", ""))
+        desc = str(p.get("node.description", ""))
+        blob = (mc + " " + name + " " + desc).lower()
+        if "video/source" in mc.lower() or "gamescope" in blob or "screen" in blob or "video/output" in mc.lower():
+            vids.append((n.get("id"), name, mc))
+    log.info(f"[screen] nodes vidéo candidats: {vids}")
+    # Préférence : un node gamescope/screen explicite, sinon le 1er Video/Source.
+    for nid, name, mc in vids:
+        if "gamescope" in (name.lower()) or "screen" in (name.lower()):
+            return str(nid)
+    for nid, name, mc in vids:
+        if "video/source" in mc.lower():
+            return str(nid)
+    return None
 
 
 def get_payload_types(sdpmsg, video_encoding, audio_encoding):
@@ -74,7 +107,10 @@ class WebRTCServer:
         default_sink = getoutput("pactl get-default-sink").splitlines()
         audio_monitor = (default_sink[0] + ".monitor") if default_sink and default_sink[0] else "@DEFAULT_MONITOR@"
         log.info(f"Creating pipeline, create_offer={create_offer}, audio_monitor={audio_monitor}")
-        desc = PIPELINE_DESC.format(video_pt=video_pt, audio_pt=audio_pt, monitor=audio_monitor)
+        node = _find_screen_node()
+        video_src = f"pipewiresrc path={node}" if node else "pipewiresrc"
+        log.info(f"[screen] source vidéo: {video_src}")
+        desc = PIPELINE_DESC.format(video_src=video_src, video_pt=video_pt, audio_pt=audio_pt, monitor=audio_monitor)
         log.info("Pipeline:\n" + desc)
         try:
             self.pipe = Gst.parse_launch(desc)
