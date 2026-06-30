@@ -59,6 +59,12 @@ def _find_screen_node():
         name = str(p.get("node.name", ""))
         desc = str(p.get("node.description", ""))
         blob = (mc + " " + name + " " + desc).lower()
+        # Exclure NOTRE webcam virtuelle (v4l2loopback /dev/video42 "Steamcord Screen")
+        # et tout loopback v4l2 : ce n'est PAS l'écran. Sinon, en BUREAU (où aucun node
+        # gamescope n'existe), on capturerait ce loopback vide → écran noir au lieu de
+        # laisser le client basculer sur le portail natif.
+        if "v4l2" in blob or "video42" in blob or "steamcord" in blob or "loopback" in blob:
+            continue
         if "video/source" in mc.lower() or "gamescope" in blob or "screen" in blob or "video/output" in mc.lower():
             vids.append((n.get("id"), name, mc))
     log.info(f"[screen] nodes vidéo candidats: {vids}")
@@ -191,6 +197,17 @@ class WebRTCServer:
                     res, sdpmsg = GstSdp.SDPMessage.new_from_text(data["offer"]["sdp"])
 
                     if not self.webrtc:
+                        # Pas de node écran capturable (= mode BUREAU : aucun node
+                        # gamescope, et le portail xdg N'EST PAS un node PipeWire
+                        # direct) → on NE bâtit PAS un pipeline noir. On signale
+                        # `no_source` : le client basculera sur le getDisplayMedia
+                        # NATIF (portail KDE), qui marche en bureau. En gamemode le
+                        # node gamescope existe → on continue normalement (gst).
+                        if _find_screen_node() is None:
+                            log.info("[screen] aucune source d'écran directe (bureau) → no_source, bascule portail natif côté client")
+                            await ws.send_json({"no_source": True})
+                            await ws.close()
+                            break
                         log.info("Incoming call: received an offer, creating pipeline")
                         pts = get_payload_types(sdpmsg, video_encoding="VP8", audio_encoding="OPUS")
                         assert "VP8" in pts

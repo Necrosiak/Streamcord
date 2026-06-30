@@ -4,6 +4,7 @@ from aiohttp.web import (  # type: ignore
     WebSocketResponse,
     AppRunner,
     TCPSite,
+    Response,
 )
 from asyncio import sleep, create_task, create_subprocess_exec
 import aiohttp_cors  # type: ignore
@@ -373,7 +374,7 @@ class Plugin:
         await cls.shared_js_tab.ensure_open()
         await setOSK(cls.shared_js_tab, True)
         logger.info("Setting discord visibility to true")
-        return "OK"
+        return Response(text="OK")
 
     @classmethod
     async def _voice_render(cls, request):
@@ -391,7 +392,7 @@ class Plugin:
             """)
         except Exception as e:
             logger.warning(f"voice_render failed: {e}")
-        return "OK"
+        return Response(text="OK")
 
     @classmethod
     async def _voice_hide(cls, request):
@@ -405,7 +406,7 @@ class Plugin:
             """)
         except Exception as e:
             logger.warning(f"voice_hide failed: {e}")
-        return "OK"
+        return Response(text="OK")
 
     @classmethod
     async def _websocket_handler(cls, request):
@@ -562,7 +563,12 @@ class Plugin:
 
     @classmethod
     async def get_local_mute(cls, user_id):
-        return await cls.evt_handler.api.get_local_mute(user_id)
+        r = await cls.evt_handler.api.get_local_mute(user_id)
+        # Le client (ancien, déjà en page) renvoie `false` coercé en `{}` via
+        # `result || {}` → le frontend ferait `!!{}` = true = muet à tort. Seul un
+        # vrai `True` = réellement muté localement. On normalise ici → fix immédiat
+        # sans dépendre d'une ré-injection du client.
+        return r is True
 
     @classmethod
     async def toggle_local_mute(cls, user_id):

@@ -50,6 +50,14 @@ class EventHandler:
         self._qr_scanned = False  # QR scanné, en attente de validation sur le téléphone
         self.state_changed_event = Event()
         self.notification = None
+        # Event DÉDIÉ aux notifications. Avant, yield_notification attendait/clear()
+        # le MÊME state_changed_event que yield_new_state → sous events rapprochés
+        # (arrivée d'un participant : VOICE_CHANNEL_SELECT + VOICE_STATE_UPDATES +
+        # reconcile en rafale) un consommateur clear() l'event posé pour l'autre →
+        # une mise à jour d'ÉTAT était AVALÉE (le frontend restait figé sur le mute
+        # transitoire du début). Découplé : state_changed_event n'a plus qu'UN seul
+        # consommateur (yield_new_state).
+        self.notification_event = Event()
         self.remote_auth = RemoteAuth()
 
     def build_state_dict(self):
@@ -68,14 +76,15 @@ class EventHandler:
             return None
 
         users = list(self.vc_members.values())
+        # Garantir que SOI est toujours présent dans la liste affichée. self est
+        # ignoré dans _voice_state_updates (présence multi-appareils) ET dans la
+        # réconciliation → un rebuild mal timé pouvait l'omettre → l'utilisateur ne
+        # se voyait pas alors qu'il est en vocal. On l'injecte en tête si absent.
+        if self.me.id and not any(u.id == self.me.id for u in users):
+            users = [self.me] + users
         # Reflète l'état de partage courant indépendamment de l'ordre des events.
         for user in users:
             user.is_live = user.id in self.streaming_users
-        me = None
-        for user in users:
-            if user.id == self.me.id:
-                me = user
-                break
 
         return {
             "channel_id": self.vc_channel_id,
@@ -85,15 +94,27 @@ class EventHandler:
         }
 
     async def toggle_mute(self, act=False):
-        self.me.is_muted = not self.me.is_muted
         if act:
+            # ON N'ENVOIE QUE LA COMMANDE — surtout PAS de lecture ni de push ici.
+            # Discord ré-émet TOUJOURS AUDIO_TOGGLE_SELF_MUTE en écho (prouvé via
+            # CDP) → `_toggle_mute` met à jour depuis la VÉRITÉ et pousse l'état =
+            # SOURCE UNIQUE. Si on pousse EN PLUS ici, on émet un 2e état : soit
+            # optimiste aveugle (base périmée), soit un get_media() racé (le toggle
+            # n'est pas encore appliqué quand on lit) → valeur ≠ écho → le bouton
+            # « clignote » (part et revient). Un seul push (l'écho, settled) = zéro
+            # flicker.
             await self.ws.send_json({"type": "AUDIO_TOGGLE_SELF_MUTE", "context": "default", "syncRemote": False})
+            return
+        self.me.is_muted = not self.me.is_muted
         self.state_changed_event.set()
 
     async def toggle_deafen(self, act=False):
-        self.me.is_deafened = not self.me.is_deafened
         if act:
+            # Idem mute : l'écho AUDIO_TOGGLE_SELF_DEAF (_toggle_deaf) est la source
+            # unique. On n'envoie que la commande pour ne pas pousser un 2e état.
             await self.ws.send_json({"type": "AUDIO_TOGGLE_SELF_DEAF", "context": "default"})
+            return
+        self.me.is_deafened = not self.me.is_deafened
         self.state_changed_event.set()
 
     async def disconnect_vc(self):
@@ -107,8 +128,8 @@ class EventHandler:
 
     async def yield_notification(self):
         while True:
-            await self.state_changed_event.wait()
-            self.state_changed_event.clear()
+            await self.notification_event.wait()
+            self.notification_event.clear()
             if self.notification:
                 yield self.notification
                 self.notification = None
@@ -176,7 +197,17 @@ class EventHandler:
         self.remote_auth.start(self.state_changed_event.set)
 
     async def _voice_channel_select(self, data):
-        self.vc_channel_id = data["channelId"]
+        new_id = data["channelId"]
+        # Re-sélection du MÊME salon (events VOICE_CHANNEL_SELECT dupliqués : poll
+        # client toutes les 2s + dispatch Discord natif + re-handshake) → NE PAS
+        # reconstruire vc_members. Le rebuild via get_voice_states peut renvoyer []
+        # transitoirement (store pas prêt pendant une reconnexion) → la liste était
+        # VIDÉE → le participant disparaissait (ou réapparaissait greyé). La
+        # réconciliation 2s maintient déjà l'état à jour ; on ne rebuild qu'au VRAI
+        # changement de salon (ou si la liste a été perdue).
+        if new_id is not None and new_id == self.vc_channel_id and self.vc_members:
+            return
+        self.vc_channel_id = new_id
         if self.vc_channel_id is None:
             self.vc_members = {}
             self.api._channel_name = None
@@ -223,6 +254,7 @@ class EventHandler:
                     user = User({"id": user_id, "username": "", "discriminator": None, "avatar": ""})
                     user.is_muted = vs.get("mute", False)
                     user.is_deafened = vs.get("deaf", False)
+                    user.is_video = vs.get("video", False)
                     await user.populate(self.api)
                     self.vc_members[user_id] = user
         except Exception as e:
@@ -248,8 +280,16 @@ class EventHandler:
                     await user.populate(self.api)
                     self.vc_members[user_id] = user
                 u = self.vc_members[user_id]
-                u.is_muted = vs.get("mute", False) or vs.get("selfMute", False)
-                u.is_deafened = vs.get("deaf", False) or vs.get("selfDeaf", False)
+                # Lecture défensive multi-casse (camelCase store / snake_case gateway)
+                # pour ne jamais rester coincé sur un faux « muet ».
+                def _flag(*keys):
+                    return any(vs.get(k) for k in keys)
+                new_mute = _flag("mute", "selfMute", "self_mute")
+                new_deaf = _flag("deaf", "selfDeaf", "self_deaf")
+                new_video = _flag("video", "selfVideo", "self_video")
+                u.is_muted = new_mute
+                u.is_deafened = new_deaf
+                u.is_video = new_video
             elif user_id in self.vc_members:
                 del self.vc_members[user_id]
 
@@ -269,10 +309,12 @@ class EventHandler:
 
     async def _rpc_notification(self, data):
         self.notification = {"title": data["message"]["embeds"][0]["author"]["name"], "body": data["message"]["embeds"][0]["description"]}
+        self.notification_event.set()
 
     async def _call_ring(self, data):
         # Incoming DM call → notify. The frontend localizes the title via kind="call".
         self.notification = {"title": "", "body": data.get("caller") or "Discord", "kind": "call"}
+        self.notification_event.set()
 
     async def _mic_webrtc(self, data):
         # Relay the Discord tab's mic offer/ICE to the SharedJSContext frontend,

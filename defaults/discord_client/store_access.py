@@ -9,7 +9,8 @@ class User:
 
         self.is_muted = False
         self.is_deafened = False
-        self.is_live = False
+        self.is_live = False        # partage d'écran (Go Live)
+        self.is_video = False       # caméra activée
         self.is_speaking = False
 
     @classmethod
@@ -37,6 +38,7 @@ class User:
             "is_muted": self.is_muted,
             "is_deafened": self.is_deafened,
             "is_live": self.is_live,
+            "is_video": self.is_video,
             "is_speaking": self.is_speaking,
         }
 

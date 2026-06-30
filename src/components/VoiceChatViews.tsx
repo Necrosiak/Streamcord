@@ -1,9 +1,10 @@
 import { call } from "@decky/api";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSteamcordState } from "../hooks/useSteamcordState";
 import { t } from "../i18n";
 import { SliderField, DialogButton } from "@decky/ui";
 import { watchVideo, stopVideo, isWatching, getStream, subscribe } from "../videoRelay";
+import { isScreenCamOn, subscribeScreenCam, startSelfPreview } from "../screenCam";
 
 // Réagit à l'arrivée du flux vidéo relayé (Vesktop→QAM) pour cet utilisateur.
 function useRemoteVideo(userId: string) {
@@ -32,8 +33,51 @@ function VideoTile({ stream }: { stream: MediaStream }) {
   );
 }
 
+// Une tuile par PISTE vidéo : un participant peut diffuser ÉCRAN + CAMÉRA en même
+// temps (2 pistes dans le même MediaStream) → on les affiche séparément (un <video>
+// ne joue qu'une piste). Stream stable par piste pour ne pas re-brancher à chaque rendu.
+function SingleTrackTile({ track }: { track: MediaStreamTrack }) {
+  const ms = useMemo(() => new MediaStream([track]), [track]);
+  return <VideoTile stream={ms} />;
+}
+function MultiVideoTiles({ stream }: { stream: MediaStream }) {
+  const tracks = stream.getVideoTracks();
+  return <>{tracks.map((trk) => <SingleTrackTile key={trk.id} track={trk} />)}</>;
+}
+
 const SliderFieldAny = SliderField as any;
 const Btn = DialogButton as any;
+
+// Aperçu LOCAL de mon propre partage d'écran (mode jeu). On lit la caméra
+// virtuelle "Steamcord Screen" (/dev/video42). Le feeder GStreamer met quelques
+// secondes à créer/alimenter le device → on réessaie jusqu'à obtenir un flux.
+function SelfPreviewTile() {
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  useEffect(() => {
+    let alive = true;
+    let timer: any;
+    const tryOpen = async () => {
+      const s = await startSelfPreview();
+      if (!alive) return;
+      if (s) setStream(s);
+      else timer = setTimeout(tryOpen, 2000); // device pas encore prêt
+    };
+    tryOpen();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, []);
+
+  if (!stream) {
+    return <div style={{ fontSize: 10, opacity: 0.6, textAlign: "center", padding: "6px 0" }}>{t("self_preview_wait")}</div>;
+  }
+  return <VideoTile stream={stream} />;
+}
+
+// Réagit aux changements d'état du partage d'écran (on/off).
+function useScreenCam() {
+  const [, force] = useState(0);
+  useEffect(() => subscribeScreenCam(() => force((n) => n + 1)), []);
+  return isScreenCamOn();
+}
 
 export function VoiceChatChannel() {
   const state = useSteamcordState();
@@ -57,6 +101,8 @@ function UserRow({ user, isSelf }: { user: any; isSelf?: boolean }) {
   const speaking = user?.is_speaking;
   const muted = user?.is_muted;
   const deafened = user?.is_deafened;
+  // Mon propre partage d'écran (mode jeu) actif → aperçu local sous mon pseudo.
+  const screenCamOn = useScreenCam();
 
   // État du mute local : on POLL la vérité moteur (Discord) en continu plutôt que
   // de lire une seule fois au montage. Sinon l'UI restait bloquée sur « Muet »
@@ -75,6 +121,9 @@ function UserRow({ user, isSelf }: { user: any; isSelf?: boolean }) {
 
   // Volume du STREAM (audio du Go Live) — indépendant du volume de la voix (micro).
   const [streamVol, setStreamVol] = useState<number>(100);
+  // Halo de focus des boutons (texte blanc + anneau, pas d'inversion de couleur).
+  const [muteFocused, setMuteFocused] = useState<boolean>(false);
+  const [videoFocused, setVideoFocused] = useState<boolean>(false);
 
   const onVolumeChange = async (val: number) => {
     setVolume(val);
@@ -137,6 +186,15 @@ function UserRow({ user, isSelf }: { user: any; isSelf?: boolean }) {
           }} />
         )}
       </div>
+      {/* Aperçu de MON partage d'écran (mode jeu), juste sous mon pseudo, pour
+          voir ce que les autres voient. */}
+      {isSelf && screenCamOn && (
+        <div style={{ padding: "2px 8px 0" }}>
+          <div style={{ fontSize: 10, opacity: 0.7, marginBottom: 2 }}>🎮 {t("self_preview_label")}</div>
+          <SelfPreviewTile />
+        </div>
+      )}
+
       {/* Volume VOIX (à quel point TU l'entends) — barre PLEINE LARGEUR. */}
       <div style={{ padding: "0 10px", boxSizing: "border-box" }}>
         <SliderFieldAny
@@ -154,10 +212,16 @@ function UserRow({ user, isSelf }: { user: any; isSelf?: boolean }) {
         <div style={{ padding: "2px 10px 0" }}>
           <Btn
             onClick={toggleLocalMute}
+            onFocus={() => setMuteFocused(true)}
+            onBlur={() => setMuteFocused(false)}
+            onGamepadFocus={() => setMuteFocused(true)}
+            onGamepadBlur={() => setMuteFocused(false)}
             style={{
               width: "100%", margin: 0, padding: "5px 0", minHeight: 0, fontSize: 11, fontWeight: 600,
               borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              background: localMuted ? "#ed4245" : "rgba(255,255,255,0.08)",
+              color: "#fff",
+              background: localMuted ? "#ed4245" : (muteFocused ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.08)"),
+              boxShadow: muteFocused ? "inset 0 0 0 2px #fff" : "none",
             }}
           >
             {localMuted ? `🔇 ${t("unmute_voice")}` : `🎙️ ${t("mute_voice")}`}
@@ -179,21 +243,27 @@ function UserRow({ user, isSelf }: { user: any; isSelf?: boolean }) {
         </div>
       )}
 
-      {/* Live (Go Live / caméra) : bouton Voir + vidéo relayée dans le bloc. */}
-      {user?.is_live && !isSelf && (
+      {/* Live (Go Live) OU caméra : bouton Voir + vidéo relayée dans le bloc. */}
+      {(user?.is_live || user?.is_video) && !isSelf && (
         <div style={{ padding: "2px 8px 0" }}>
           <Btn
             onClick={() => (watching ? stopVideo(user.id) : watchVideo(user.id))}
+            onFocus={() => setVideoFocused(true)}
+            onBlur={() => setVideoFocused(false)}
+            onGamepadFocus={() => setVideoFocused(true)}
+            onGamepadBlur={() => setVideoFocused(false)}
             style={{
               width: "100%", margin: 0, padding: "5px 0", minHeight: 0, fontSize: 11, fontWeight: 600,
               borderRadius: 6,
               display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              background: watching ? "#ed4245" : "rgba(88,101,242,0.45)",
+              color: "#fff",
+              background: watching ? "#ed4245" : (videoFocused ? "rgba(88,101,242,0.85)" : "rgba(88,101,242,0.45)"),
+              boxShadow: videoFocused ? "inset 0 0 0 2px #fff" : "none",
             }}
           >
-            {watching ? t("video_stop") : t("video_watch")}
+            {watching ? t("video_stop") : `${user?.is_live ? "🖥️" : "📷"} ${t("video_watch")}`}
           </Btn>
-          {watching && remoteVideo && <VideoTile stream={remoteVideo} />}
+          {watching && remoteVideo && <MultiVideoTiles stream={remoteVideo} />}
           {watching && !remoteVideo && (
             <div style={{ fontSize: 10, opacity: 0.6, textAlign: "center", padding: "6px 0" }}>{t("video_connecting")}</div>
           )}
