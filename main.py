@@ -173,6 +173,12 @@ class Plugin:
     _audio_out = None
     _audio_in = None
     _AUDIO_CFG = os.path.expanduser("~/.config/steamcord-audio.json")
+    # ── Partage audio du jeu (voir section "Partage AUDIO du jeu") ──
+    _ga_active = False
+    _ga_modules = []          # ids des modules pactl chargés (ordre de chargement)
+    _ga_loop_mod = {}         # branche ("voice"/"game") -> id du module loopback
+    _ga_real_sink = None      # vraie sortie à restaurer au stop
+    _ga_vol = {"voice": 100, "game": 60}
 
     @classmethod
     async def _main(cls):
@@ -259,6 +265,7 @@ class Plugin:
         cls._load_audio_cfg()
         create_task(cls._audio_routing_watcher())
         create_task(cls._screen_diag())
+        create_task(cls._ga_boot_cleanup())
 
         async for state in cls.evt_handler.yield_new_state():
             await emit("state", state)
@@ -689,15 +696,29 @@ class Plugin:
     @classmethod
     async def _apply_audio_routing(cls):
         from json import loads
+        out_target = cls._audio_out
+        in_target = cls._audio_in
+        if cls._ga_active:
+            # Partage audio jeu : Vesktop ÉCOUTE sur la vraie sortie (surtout pas le
+            # sink jeu, sinon la voix des autres repartirait dans le mix = écho) et
+            # CAPTURE le mix micro+jeu à la place du micro.
+            out_target = out_target or cls._ga_real_sink
+            in_target = "steamcord_mix.monitor"
         try:
-            if cls._audio_out:
+            if out_target or cls._ga_active:
                 for si in loads(await cls._pactl("list", "sink-inputs", want_json=True) or "[]"):
                     if cls._is_vesktop_stream(si):
-                        await cls._pactl("move-sink-input", str(si.get("index")), cls._audio_out)
-            if cls._audio_in:
+                        if out_target:
+                            await cls._pactl("move-sink-input", str(si.get("index")), out_target)
+                    elif cls._ga_active and str(si.get("owner_module", "")) not in cls._ga_modules:
+                        # Tout le reste (jeu, système) joue dans le sink jeu — les
+                        # nouveaux flux y vont déjà (default sink), ceci rattrape les
+                        # apps qui ciblent un sink explicite. Move idempotent.
+                        await cls._pactl("move-sink-input", str(si.get("index")), "steamcord_game")
+            if in_target:
                 for so in loads(await cls._pactl("list", "source-outputs", want_json=True) or "[]"):
                     if cls._is_vesktop_stream(so):
-                        await cls._pactl("move-source-output", str(so.get("index")), cls._audio_in)
+                        await cls._pactl("move-source-output", str(so.get("index")), in_target)
         except Exception as e:
             logger.warning(f"audio routing failed: {e!r}")
 
@@ -707,7 +728,7 @@ class Plugin:
         # le routage périodiquement pour qu'un nouveau flux suive le choix de l'user.
         while True:
             try:
-                if cls._audio_out or cls._audio_in:
+                if cls._audio_out or cls._audio_in or cls._ga_active:
                     await cls._apply_audio_routing()
             except Exception:
                 pass
@@ -721,6 +742,9 @@ class Plugin:
                 cfg = load(f)
             cls._audio_out = cfg.get("output") or None
             cls._audio_in = cfg.get("input") or None
+            if isinstance(cfg.get("ga_vol"), dict):
+                cls._ga_vol.update({k: int(v) for k, v in cfg["ga_vol"].items()
+                                    if k in cls._ga_vol})
         except Exception:
             pass
 
@@ -730,7 +754,8 @@ class Plugin:
         try:
             os.makedirs(os.path.dirname(cls._AUDIO_CFG), exist_ok=True)
             with open(cls._AUDIO_CFG, "w") as f:
-                dump({"output": cls._audio_out, "input": cls._audio_in}, f)
+                dump({"output": cls._audio_out, "input": cls._audio_in,
+                      "ga_vol": cls._ga_vol}, f)
         except Exception as e:
             logger.warning(f"save audio cfg failed: {e!r}")
 
@@ -848,6 +873,160 @@ class Plugin:
         except Exception:
             jpg = ""
         return {"running": running, "jpg": jpg}
+
+    # ── Partage AUDIO du jeu (son du jeu → micro Discord, jauges voix/jeu) ───────
+    # Deux sinks virtuels : `steamcord_game` devient la sortie PAR DÉFAUT (les jeux
+    # y jouent) et reboucle vers la vraie sortie (le user continue d'entendre) ;
+    # `steamcord_mix` reçoit micro + jeu via deux loopbacks dont le volume = les
+    # jauges du QAM, et son monitor devient l'entrée de Vesktop (via
+    # _apply_audio_routing). Vesktop reste routé sur la vraie sortie → la voix des
+    # participants n'entre pas dans le mix (pas d'écho chez eux).
+    @classmethod
+    async def _pactl_load(cls, *args):
+        out = (await cls._pactl("load-module", *args)).strip()
+        if not out.isdigit():
+            raise Exception(f"load-module {args[0]} a échoué ({out!r})")
+        cls._ga_modules.append(out)
+        return out
+
+    @classmethod
+    async def _ga_boot_cleanup(cls):
+        # Après un restart de plugin_loader, d'éventuels modules steamcord_* survivent
+        # dans pipewire-pulse alors que notre état est perdu → on repart propre (et on
+        # restaure la sortie par défaut si elle pointait encore sur le sink jeu).
+        try:
+            if "steamcord_" in (await cls._pactl("get-default-sink")).strip():
+                await cls.stop_game_audio()
+            else:
+                await cls._ga_cleanup_modules()
+        except Exception as e:
+            logger.warning(f"[gameaudio] boot cleanup: {e!r}")
+
+    @classmethod
+    async def _ga_cleanup_modules(cls):
+        # Purge idempotente des modules steamcord_* résiduels (crash / restart
+        # plugin_loader : pipewire-pulse, lui, garde les modules chargés).
+        from json import loads
+        try:
+            for m in loads(await cls._pactl("list", "modules", want_json=True) or "[]"):
+                if "steamcord_" in str(m.get("argument", "")):
+                    await cls._pactl("unload-module", str(m.get("index")))
+        except Exception as e:
+            logger.warning(f"[gameaudio] purge modules: {e!r}")
+
+    @classmethod
+    async def start_game_audio(cls):
+        from json import loads
+        if cls._ga_active:
+            return True
+        try:
+            await cls._ga_cleanup_modules()
+            cls._ga_modules = []
+            cls._ga_loop_mod = {}
+            real = cls._audio_out or (await cls._pactl("get-default-sink")).strip()
+            if not real or "steamcord_" in real:
+                raise Exception(f"sortie réelle introuvable ({real!r})")
+            cls._ga_real_sink = real
+            await cls._pactl_load("module-null-sink", "sink_name=steamcord_game",
+                                  "sink_properties=device.description=SteamcordGame")
+            await cls._pactl_load("module-null-sink", "sink_name=steamcord_mix",
+                                  "sink_properties=device.description=SteamcordMix")
+            # Le user continue d'entendre le jeu sur la vraie sortie.
+            await cls._pactl_load("module-loopback", "source=steamcord_game.monitor",
+                                  f"sink={real}", "latency_msec=30")
+            # Branche JEU du mix (jauge 🎮).
+            cls._ga_loop_mod["game"] = await cls._pactl_load(
+                "module-loopback", "source=steamcord_game.monitor",
+                "sink=steamcord_mix", "latency_msec=30")
+            # Branche VOIX du mix (jauge 🎙️) — seulement si un vrai micro existe
+            # (sur cette machine la source par défaut peut être un monitor HDMI).
+            mic = cls._audio_in or (await cls._pactl("get-default-source")).strip()
+            if mic and not mic.endswith(".monitor") and "steamcord_" not in mic:
+                cls._ga_loop_mod["voice"] = await cls._pactl_load(
+                    "module-loopback", f"source={mic}",
+                    "sink=steamcord_mix", "latency_msec=30")
+            else:
+                logger.warning(f"[gameaudio] aucun micro réel ({mic!r}) — branche voix absente")
+            await cls._pactl("set-default-sink", "steamcord_game")
+            cls._ga_active = True
+            await cls._apply_audio_routing()  # déplace jeu→steamcord_game, Vesktop→réel/mix
+            await cls._ga_apply_volumes()
+            logger.info(f"[gameaudio] ACTIF (sortie réelle={real}, micro={mic!r}, "
+                        f"branches={list(cls._ga_loop_mod)})")
+            return True
+        except Exception as e:
+            logger.warning(f"[gameaudio] démarrage KO: {e!r}")
+            await cls.stop_game_audio()
+            return False
+
+    @classmethod
+    async def stop_game_audio(cls):
+        from json import loads
+        cls._ga_active = False
+        try:
+            real = cls._ga_real_sink or (await cls._pactl("get-default-sink")).strip()
+            if not real or "steamcord_" in real:
+                # État perdu (restart) et défaut encore sur le sink virtuel → premier
+                # sink matériel disponible.
+                for line in (await cls._pactl("list", "sinks", "short")).splitlines():
+                    name = (line.split("\t") + [""])[1]
+                    if name and "steamcord_" not in name:
+                        real = name
+                        break
+            if real and "steamcord_" not in real:
+                await cls._pactl("set-default-sink", real)
+                for si in loads(await cls._pactl("list", "sink-inputs", want_json=True) or "[]"):
+                    if str(si.get("owner_module", "")) not in cls._ga_modules:
+                        await cls._pactl("move-sink-input", str(si.get("index")), real)
+            # Rendre à Vesktop son entrée d'origine (choix user ou défaut système).
+            mic = cls._audio_in or (await cls._pactl("get-default-source")).strip()
+            if mic and "steamcord_" not in mic:
+                for so in loads(await cls._pactl("list", "source-outputs", want_json=True) or "[]"):
+                    if cls._is_vesktop_stream(so):
+                        await cls._pactl("move-source-output", str(so.get("index")), mic)
+        except Exception as e:
+            logger.warning(f"[gameaudio] restauration: {e!r}")
+        for mid in reversed(cls._ga_modules):
+            try:
+                await cls._pactl("unload-module", mid)
+            except Exception:
+                pass
+        cls._ga_modules = []
+        cls._ga_loop_mod = {}
+        cls._ga_real_sink = None
+        await cls._ga_cleanup_modules()
+        logger.info("[gameaudio] arrêté, routage restauré")
+        return True
+
+    @classmethod
+    async def _ga_apply_volumes(cls):
+        # Les jauges = volume du sink-input que chaque loopback pousse dans le mix
+        # (retrouvé par owner_module, seul lien stable module→flux).
+        from json import loads
+        try:
+            sis = loads(await cls._pactl("list", "sink-inputs", want_json=True) or "[]")
+            for kind, mid in cls._ga_loop_mod.items():
+                pct = max(0, min(150, int(cls._ga_vol.get(kind, 100))))
+                for si in sis:
+                    if str(si.get("owner_module")) == str(mid):
+                        await cls._pactl("set-sink-input-volume", str(si.get("index")), f"{pct}%")
+        except Exception as e:
+            logger.warning(f"[gameaudio] volumes: {e!r}")
+
+    @classmethod
+    async def set_game_audio_volume(cls, kind, pct):
+        if kind in cls._ga_vol:
+            cls._ga_vol[kind] = int(pct)
+            cls._save_audio_cfg()
+        if cls._ga_active:
+            await cls._ga_apply_volumes()
+        return True
+
+    @classmethod
+    async def get_game_audio(cls):
+        return {"active": cls._ga_active,
+                "has_mic": ("voice" in cls._ga_loop_mod) if cls._ga_active else True,
+                "voice": cls._ga_vol["voice"], "game": cls._ga_vol["game"]}
 
     @classmethod
     async def mic_webrtc_answer(cls, answer):

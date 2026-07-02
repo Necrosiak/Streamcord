@@ -52,6 +52,7 @@ import {
 import { UploadScreenshot } from "./components/UploadScreenshot";
 import { GoLiveButton } from "./components/buttons/GoLiveButton";
 import { ScreenCameraButton } from "./components/buttons/ScreenCameraButton";
+import { GameAudioShare } from "./components/buttons/GameAudioShare";
 import { ChannelBrowser } from "./components/ChannelBrowser";
 import { DMBrowser } from "./components/DMBrowser";
 import { TextChat } from "./components/TextChat";
@@ -516,6 +517,9 @@ const Content = () => {
                 </div>
                 <div style={{ marginTop: 8 }}>
                   <ScreenCameraButton />
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <GameAudioShare />
                 </div>
                 {/* Rejoindre un AUTRE vocal sans quitter l'appel courant. */}
                 <div style={{ marginTop: 8 }}>
