@@ -178,6 +178,7 @@ class Plugin:
     _ga_modules = []          # ids des modules pactl chargés (ordre de chargement)
     _ga_loop_mod = {}         # branche ("voice"/"game") -> id du module loopback
     _ga_real_sink = None      # vraie sortie à restaurer au stop
+    _ga_real_source = None    # source par défaut à restaurer au stop
     _ga_vol = {"voice": 100, "game": 60}
 
     @classmethod
@@ -703,7 +704,7 @@ class Plugin:
             # sink jeu, sinon la voix des autres repartirait dans le mix = écho) et
             # CAPTURE le mix micro+jeu à la place du micro.
             out_target = out_target or cls._ga_real_sink
-            in_target = "steamcord_mix.monitor"
+            in_target = "steamcord_mic"
         try:
             if out_target or cls._ga_active:
                 for si in loads(await cls._pactl("list", "sink-inputs", want_json=True) or "[]"):
@@ -899,9 +900,11 @@ class Plugin:
     # Deux sinks virtuels : `steamcord_game` devient la sortie PAR DÉFAUT (les jeux
     # y jouent) et reboucle vers la vraie sortie (le user continue d'entendre) ;
     # `steamcord_mix` reçoit micro + jeu via deux loopbacks dont le volume = les
-    # jauges du QAM, et son monitor devient l'entrée de Vesktop (via
-    # _apply_audio_routing). Vesktop reste routé sur la vraie sortie → la voix des
-    # participants n'entre pas dans le mix (pas d'écho chez eux).
+    # jauges du QAM ; un micro virtuel `steamcord_mic` (remap-source du monitor du
+    # mix) devient la SOURCE PAR DÉFAUT — indispensable : Discord (entrée «Default»)
+    # ne liste pas les monitors, donc sans micro réel il n'ouvrirait AUCUNE capture.
+    # Vesktop reste routé sur la vraie sortie → la voix des participants n'entre
+    # pas dans le mix (pas d'écho chez eux).
     @classmethod
     async def _pactl_load(cls, *args):
         out = (await cls._pactl("load-module", *args)).strip()
@@ -916,7 +919,9 @@ class Plugin:
         # dans pipewire-pulse alors que notre état est perdu → on repart propre (et on
         # restaure la sortie par défaut si elle pointait encore sur le sink jeu).
         try:
-            if "steamcord_" in (await cls._pactl("get-default-sink")).strip():
+            cur = ((await cls._pactl("get-default-sink")).strip() + " "
+                   + (await cls._pactl("get-default-source")).strip())
+            if "steamcord_" in cur:
                 await cls.stop_game_audio()
             else:
                 await cls._ga_cleanup_modules()
@@ -927,11 +932,13 @@ class Plugin:
     async def _ga_cleanup_modules(cls):
         # Purge idempotente des modules steamcord_* résiduels (crash / restart
         # plugin_loader : pipewire-pulse, lui, garde les modules chargés).
-        from json import loads
+        # ⚠ le JSON de `pactl list modules` n'a PAS de champ index → format short
+        # (index\tnom\targument ; les arguments multi-lignes n'ont pas de tab).
         try:
-            for m in loads(await cls._pactl("list", "modules", want_json=True) or "[]"):
-                if "steamcord_" in str(m.get("argument", "")):
-                    await cls._pactl("unload-module", str(m.get("index")))
+            for line in (await cls._pactl("list", "modules", "short")).splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 3 and "steamcord_" in parts[2]:
+                    await cls._pactl("unload-module", parts[0])
         except Exception as e:
             logger.warning(f"[gameaudio] purge modules: {e!r}")
 
@@ -968,6 +975,16 @@ class Plugin:
                     "sink=steamcord_mix", "latency_msec=30")
             else:
                 logger.warning(f"[gameaudio] aucun micro réel ({mic!r}) — branche voix absente")
+            # Micro virtuel branché sur le mix, promu source PAR DÉFAUT : sans lui,
+            # Discord (entrée « Default ») n'a rien à ouvrir quand aucun micro réel
+            # n'existe (WebRTC filtre les monitors) → aucune capture, mix jamais
+            # transmis. « Micro-Steamcord » apparaît comme un vrai périphérique.
+            await cls._pactl_load("module-remap-source", "master=steamcord_mix.monitor",
+                                  "source_name=steamcord_mic",
+                                  "source_properties=device.description=Micro-Steamcord")
+            cur_src = (await cls._pactl("get-default-source")).strip()
+            cls._ga_real_source = cur_src if cur_src and "steamcord_" not in cur_src else None
+            await cls._pactl("set-default-source", "steamcord_mic")
             await cls._pactl("set-default-sink", "steamcord_game")
             cls._ga_active = True
             await cls._apply_audio_routing()  # déplace jeu→steamcord_game, Vesktop→réel/mix
@@ -999,6 +1016,16 @@ class Plugin:
                 for si in loads(await cls._pactl("list", "sink-inputs", want_json=True) or "[]"):
                     if str(si.get("owner_module", "")) not in cls._ga_modules:
                         await cls._pactl("move-sink-input", str(si.get("index")), real)
+            # Restaurer la source par défaut (le micro virtuel va être déchargé).
+            src = cls._ga_real_source
+            if not src or "steamcord_" in src:
+                cand = [(line.split("\t") + [""])[1]
+                        for line in (await cls._pactl("list", "sources", "short")).splitlines()]
+                cand = [n for n in cand if n and "steamcord_" not in n]
+                src = next((n for n in cand if not n.endswith(".monitor")),
+                           cand[0] if cand else None)
+            if src and "steamcord_" not in src:
+                await cls._pactl("set-default-source", src)
             # Rendre à Vesktop son entrée d'origine (choix user ou défaut système).
             mic = cls._audio_in or (await cls._pactl("get-default-source")).strip()
             if mic and "steamcord_" not in mic:
@@ -1015,6 +1042,7 @@ class Plugin:
         cls._ga_modules = []
         cls._ga_loop_mod = {}
         cls._ga_real_sink = None
+        cls._ga_real_source = None
         await cls._ga_cleanup_modules()
         logger.info("[gameaudio] arrêté, routage restauré")
         return True
