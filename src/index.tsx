@@ -414,6 +414,24 @@ const UpdaterSection = () => {
   );
 };
 
+// Environnement d'affichage : "desktop" (KWin = Bureau/Big Picture, Go Live
+// marche), "gamescope" (console, seul « mode jeu » marche), "unknown" (on
+// affiche les deux boutons plutôt que d'en priver l'utilisateur).
+function useShareEnv(): "desktop" | "gamescope" | "unknown" {
+  const [env, setEnv] = useState<"desktop" | "gamescope" | "unknown">("unknown");
+  useEffect(() => {
+    let alive = true;
+    const poll = () =>
+      call<[], { env: string }>("get_share_env")
+        .then((r) => { if (alive) setEnv((r?.env as any) || "unknown"); })
+        .catch(() => { if (alive) setEnv("unknown"); });
+    poll();
+    const id = setInterval(poll, 15000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+  return env;
+}
+
 const Content = () => {
   const state = useSteamcordState();
   const [topTab, setTopTab] = useState<"voice" | "text" | "config">("voice");
@@ -422,6 +440,7 @@ const Content = () => {
   // En appel : la vue par défaut est l'appel en cours. « Parcourir Discord »
   // bascule browsing=true pour révéler la navigation SANS quitter l'appel.
   const [browsing, setBrowsing] = useState(false);
+  const shareEnv = useShareEnv();
 
   const inCall = !!state?.vc?.channel_id;
   // Chaque début/fin d'appel ramène à la vue naturelle (appel si en appel).
@@ -512,12 +531,19 @@ const Content = () => {
               <>
                 <VoiceChatChannel />
                 <VoiceChatMembers />
-                <div style={{ marginTop: 8 }}>
-                  <GoLiveButton />
-                </div>
-                <div style={{ marginTop: 8 }}>
-                  <ScreenCameraButton />
-                </div>
+                {/* Un seul bouton de partage selon l'environnement : Go Live
+                    (portail) en Bureau/Big Picture, « mode jeu » (v4l2) en
+                    console gamescope. Env inconnu → les deux, par sécurité. */}
+                {shareEnv !== "gamescope" && (
+                  <div style={{ marginTop: 8 }}>
+                    <GoLiveButton />
+                  </div>
+                )}
+                {shareEnv !== "desktop" && (
+                  <div style={{ marginTop: 8 }}>
+                    <ScreenCameraButton />
+                  </div>
+                )}
                 <div style={{ marginTop: 8 }}>
                   <GameAudioShare />
                 </div>

@@ -874,6 +874,27 @@ class Plugin:
             jpg = ""
         return {"running": running, "jpg": jpg}
 
+    @classmethod
+    async def get_share_env(cls):
+        # Bureau/Big Picture (KWin) vs console gamescope : décide quel bouton de
+        # partage afficher (Go Live = portail, marche seulement sous KWin ; « mode
+        # jeu » = node gamescope, marche seulement en console). KWin testé en
+        # PREMIER : c'est le signal fiable — les sockets gamescope-* persistent
+        # dans XDG_RUNTIME_DIR après une session gamemode, et un gamescope
+        # imbriqué par-jeu peut tourner sous KWin (= Bureau quand même).
+        async def _running(name):
+            p = await create_subprocess_exec("pgrep", "-x", name,
+                                             stdout=DEVNULL, stderr=DEVNULL)
+            return (await p.wait()) == 0
+        try:
+            if await _running("kwin_wayland") or await _running("kwin_x11"):
+                return {"env": "desktop"}
+            if await _running("gamescope") or await _running("gamescope-wl"):
+                return {"env": "gamescope"}
+        except Exception as e:
+            logger.warning(f"[shareenv] {e!r}")
+        return {"env": "unknown"}
+
     # ── Partage AUDIO du jeu (son du jeu → micro Discord, jauges voix/jeu) ───────
     # Deux sinks virtuels : `steamcord_game` devient la sortie PAR DÉFAUT (les jeux
     # y jouent) et reboucle vers la vraie sortie (le user continue d'entendre) ;
